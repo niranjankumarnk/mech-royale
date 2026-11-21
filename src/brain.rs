@@ -255,33 +255,39 @@ pub struct Policy {
     pub finish: bool,
     /// Break off to regenerate earlier when two or three hunters are on us.
     pub backoff: bool,
+    /// Second step on the same dial (0 = off).
+    pub backoff2: u8,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 2 }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "k" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: false },
-            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false, backoff: false },
-            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false, backoff: false },
-            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false, backoff: false },
-            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "m" => Policy { backoff2: 0, ..Policy::submitted() },
+            "n1" => Policy { backoff2: 1, ..Policy::submitted() },
+            "n2" => Policy { backoff2: 2, ..Policy::submitted() },
+            "n3" => Policy { backoff2: 3, ..Policy::submitted() },
+            "k" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: false, backoff2: 0 },
+            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false, backoff: false, backoff2: 0 },
+            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false, backoff: false, backoff2: 0 },
+            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0 },
             _ => Policy::submitted(),
         }
     }
@@ -1914,6 +1920,14 @@ impl Brain {
                 // outnumbered: break off earlier, while there is still health to get away with
                 if self.pol.backoff && !endgame && p.hp > 250.0 && ((combat.len() >= 3 && hpf < 0.8) || (combat.len() == 2 && hpf < 0.5 && losing)) {
                     self.regen_mode = true;
+                }
+                // losing a duel: leave it sooner, with enough health left to reach cover
+                let v = self.pol.backoff2;
+                if v > 0 && !endgame && p.hp > 250.0 && losing {
+                    let (one, two) = match v { 1 => (0.55, 0.5), 2 => (0.4, 0.65), _ => (0.55, 0.65) };
+                    if (combat.len() == 1 && hpf < one) || (combat.len() == 2 && hpf < two) {
+                        self.regen_mode = true;
+                    }
                 }
                 fight = !self.regen_mode || p.hp < 200.0 || p.d < 35.0;
             }
