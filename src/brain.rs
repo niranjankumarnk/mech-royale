@@ -262,7 +262,7 @@ pub struct Policy {
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 2 }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 0 }
     }
 
     /// Named presets for the simulator.
@@ -1923,11 +1923,15 @@ impl Brain {
                 }
                 // losing a duel: leave it sooner, with enough health left to reach cover
                 let v = self.pol.backoff2;
-                if v > 0 && !endgame && p.hp > 250.0 && losing {
+                if v > 0 && v < 4 && !endgame && p.hp > 250.0 && losing {
                     let (one, two) = match v { 1 => (0.55, 0.5), 2 => (0.4, 0.65), _ => (0.55, 0.65) };
                     if (combat.len() == 1 && hpf < one) || (combat.len() == 2 && hpf < two) {
                         self.regen_mode = true;
                     }
+                }
+                // three or more at once is never a fight to stand in
+                if v == 4 && !endgame && combat.len() >= 3 && p.hp > 250.0 {
+                    self.regen_mode = true;
                 }
                 fight = !self.regen_mode || p.hp < 200.0 || p.d < 35.0;
             }
