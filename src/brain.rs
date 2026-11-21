@@ -253,32 +253,35 @@ pub struct Policy {
     pub split: bool,
     /// Keep after a wounded practice hunter that breaks contact.
     pub finish: bool,
+    /// Break off to regenerate earlier when two or three hunters are on us.
+    pub backoff: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false },
-            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false },
-            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false },
-            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "k" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: false },
+            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false, backoff: false },
+            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false, backoff: false },
+            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false, backoff: false },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false },
             _ => Policy::submitted(),
         }
     }
@@ -1906,6 +1909,10 @@ impl Brain {
                 // practice ladder: every hunter has to be killed; back off only to regenerate
                 let losing = ttk_me < ttk_them * 0.8;
                 if !endgame && ((hpf < 0.4 && losing && p.hp > 250.0) || (combat.len() >= 3 && hpf < 0.6)) {
+                    self.regen_mode = true;
+                }
+                // outnumbered: break off earlier, while there is still health to get away with
+                if self.pol.backoff && !endgame && p.hp > 250.0 && ((combat.len() >= 3 && hpf < 0.8) || (combat.len() == 2 && hpf < 0.5 && losing)) {
                     self.regen_mode = true;
                 }
                 fight = !self.regen_mode || p.hp < 200.0 || p.d < 35.0;
