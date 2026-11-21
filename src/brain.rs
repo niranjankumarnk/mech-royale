@@ -234,24 +234,30 @@ pub struct Policy {
     /// In a free-for-all, hide in the middle of a nearby roof (no peeking, no patrol; shoot back
     /// only at a mech that is shooting us).
     pub roof_ffa: bool,
+    /// Climb over what holds us up: when pressed against something, or when three seconds bring
+    /// us no closer to where we are going, jump and jet until the feet clear it (replaces the
+    /// one-second hop of version 1). This is what gets the mech out of the stadium bowl.
+    pub climb: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true },
             _ => Policy::submitted(),
         }
     }
@@ -356,6 +362,17 @@ pub struct Brain {
     stuck: i32,
     unstick: i32,
     unstick_dir: f32,
+    /// Decisions left in the current climb (jump, then jet until the feet clear what is ahead).
+    jet: i32,
+    jet_from: [f32; 2],
+    jet_dir: [f32; 2],
+    jet_fails: i32,
+    jet_wait: i32,
+    /// Progress toward the current walking goal: the goal, the best distance reached and when.
+    prog_goal: [f32; 2],
+    prog_best: f32,
+    prog_since: i64,
+    noprog: bool,
     strafe_dir: f32,
     strafe_until: f32,
     fight_until: f32,
@@ -467,6 +484,15 @@ impl Brain {
             stuck: 0,
             unstick: 0,
             unstick_dir: 0.0,
+            jet: 0,
+            jet_from: [0.0, 0.0],
+            jet_dir: [1.0, 0.0],
+            jet_fails: 0,
+            jet_wait: 0,
+            prog_goal: [0.0, 0.0],
+            prog_best: 0.0,
+            prog_since: 0,
+            noprog: false,
             strafe_dir: 1.0,
             strafe_until: 0.0,
             fight_until: -1.0,
@@ -1043,6 +1069,20 @@ impl Brain {
             a.mv = [0.0, 0.0];
             return;
         }
+        // progress watch: three seconds without getting 2 m closer to the same goal means the route
+        // the grid believes in does not work here
+        if d2(&self.prog_goal, &goal) > 4.0 {
+            self.prog_goal = goal;
+            self.prog_best = dg;
+            self.prog_since = self.dcount;
+        } else if dg < self.prog_best - 2.0 {
+            self.prog_best = dg;
+            self.prog_since = self.dcount;
+        } else if self.dcount - self.prog_since >= 30 && dg > 12.0 {
+            self.noprog = true;
+            self.prog_since = self.dcount;
+            self.prog_best = dg;
+        }
         let need = self.path.is_empty() || self.dcount - self.path_tick >= 3 || d2(&self.path_goal, &goal) > 4.0;
         // time guard: a search costs up to about 2 ms; if this decision has already been slow
         // (a busy scorer), keep following the path we have rather than risk the 50 ms budget
@@ -1131,6 +1171,14 @@ impl Brain {
             if k == last && self.path_found && (dg < 4.0 || self.map.walk_clear(x, y, goal[0], goal[1])) {
                 target = goal;
             }
+            if !self.path_found && self.pol.climb {
+                // The goal cannot be walked to (a walled bowl, a courtyard, a roof). At the end of
+                // what can be walked, press straight toward it; the climb routine does the rest.
+                let end = self.map.center(self.path[last] as usize);
+                if d2(&end, &[x, y]) < 5.0 {
+                    target = goal;
+                }
+            }
         }
         let dx = target[0] - x;
         let dy = target[1] - y;
@@ -1196,13 +1244,13 @@ impl Brain {
                     best_depth = best_depth.min(depth);
                 }
             }
-            for (dx, dy) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+            for (k, (dx, dy)) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)].into_iter().enumerate() {
                 let (ni, nj) = (ci + dx, cj + dy);
                 if ni < 0 || nj < 0 || ni >= gx || nj >= gy {
                     continue;
                 }
                 let n = nj as usize * m.gx + ni as usize;
-                if self.cover_seen[n] == ep || !m.passable(n) || m.surf[n] - m.surf[c] > 1.9 {
+                if self.cover_seen[n] == ep || !m.passable(n) || !m.can_step(c, k) {
                     continue;
                 }
                 self.cover_seen[n] = ep;
@@ -2099,32 +2147,111 @@ impl Brain {
             }
         }
 
-        // ---- stuck recovery: hop and jet over whatever holds us
-        let speed = (me.vel[0] * me.vel[0] + me.vel[1] * me.vel[1]).sqrt();
-        let moving = a.mv[0].abs() + a.mv[1].abs() > 0.5;
-        if moving && speed < 1.2 && me.grounded {
-            self.stuck += 1;
-        } else if speed > 3.0 || !moving {
-            self.stuck = 0;
-        }
-        if self.stuck >= 6 && self.unstick == 0 {
-            self.unstick = 10;
-            self.unstick_dir = (self.rand() - 0.5) * 2.4;
-            self.path.clear();
-        }
-        if self.unstick > 0 {
-            self.unstick -= 1;
-            let ang = a.mv[1].atan2(a.mv[0]) + self.unstick_dir;
-            if moving {
-                a.mv = [ang.cos(), ang.sin()];
-            }
-            if me.grounded {
-                a.jump = true;
-            } else if me.energy > 10.0 {
-                a.boost = true;
-            }
-            if self.unstick == 0 {
+        if self.pol.climb && !matches!(self.roof_st, RoofSt::Climb | RoofSt::Leave) {
+            // ---- stuck recovery: climb over whatever holds us (jump, then jet until the feet clear it)
+            let speed = (me.vel[0] * me.vel[0] + me.vel[1] * me.vel[1]).sqrt();
+            let mvn = (a.mv[0] * a.mv[0] + a.mv[1] * a.mv[1]).sqrt();
+            let moving = mvn > 0.5;
+            if moving && speed < 1.5 && me.grounded {
+                self.stuck += 1;
+            } else if speed > 3.0 || !moving {
                 self.stuck = 0;
+            }
+            if self.jet_wait > 0 {
+                self.jet_wait -= 1;
+            }
+            // a jump costs nothing and a short jet very little: start at once unless the last try ran dry
+            let jet_min = if self.jet_fails > 0 { 85.0 } else { 5.0 };
+            if self.stuck >= 3 && me.grounded {
+                a.boost = false; // running into a wall only burns the energy the climb needs
+            }
+            let noprog = self.noprog;
+            self.noprog = false;
+            if (self.stuck >= 6 || noprog) && self.jet == 0 && self.jet_wait == 0 && me.energy >= jet_min && moving {
+                self.jet = 70;
+                self.jet_from = me_p;
+                // pressed against something: keep the direction we were walking. No progress along a
+                // route: go straight for the goal instead, over whatever is in the way.
+                let mut dir = [a.mv[0] / mvn, a.mv[1] / mvn];
+                if noprog && self.stuck < 6 {
+                    let g = self.prog_goal;
+                    let dn = d2(&g, &me_p).max(0.01);
+                    dir = [(g[0] - me_p[0]) / dn, (g[1] - me_p[1]) / dn];
+                }
+                // after a failed climb try a little to one side, then the other
+                let rot = match self.jet_fails % 3 {
+                    1 => 0.7f32,
+                    2 => -0.7,
+                    _ => 0.0,
+                };
+                let (sn, cs) = rot.sin_cos();
+                self.jet_dir = [dir[0] * cs - dir[1] * sn, dir[0] * sn + dir[1] * cs];
+                self.path.clear();
+            }
+            if self.jet > 0 {
+                self.jet -= 1;
+                let dir = self.jet_dir;
+                a.mv = dir;
+                // highest surface in the next few metres, as wide as the mech: the feet must get above it
+                let mut top = f32::NEG_INFINITY;
+                for sdist in [0.0f32, 1.5, 3.0, 4.5, 6.0, 7.5] {
+                    for lat in [-2.6f32, 0.0, 2.6] {
+                        let px = me.pos[0] + dir[0] * sdist - dir[1] * lat;
+                        let py = me.pos[1] + dir[1] * sdist + dir[0] * lat;
+                        top = top.max(self.map.support(px, py));
+                    }
+                }
+                let need_z = top + 1.0;
+                if me.grounded {
+                    a.boost = false;
+                    // something to get over, or simply not moving: hop
+                    if me.pos[2] < need_z - 0.5 || speed < 1.5 {
+                        a.jump = true;
+                    }
+                } else {
+                    a.boost = me.energy > 1.0 && me.pos[2] < need_z;
+                }
+                let moved = d2(&me_p, &self.jet_from);
+                if moved > 7.0 && me.grounded {
+                    self.jet = 0;
+                    self.stuck = 0;
+                    self.jet_fails = 0;
+                } else if (me.energy < 2.0 && me.grounded) || self.jet == 0 {
+                    // did not make it: wait for the energy to come back, then try again from a full tank
+                    self.jet = 0;
+                    self.stuck = 0;
+                    self.jet_fails += 1;
+                    self.jet_wait = 20;
+                }
+            }
+        } else if !self.pol.climb {
+            // ---- stuck recovery: hop and jet over whatever holds us
+            let speed = (me.vel[0] * me.vel[0] + me.vel[1] * me.vel[1]).sqrt();
+            let moving = a.mv[0].abs() + a.mv[1].abs() > 0.5;
+            if moving && speed < 1.2 && me.grounded {
+                self.stuck += 1;
+            } else if speed > 3.0 || !moving {
+                self.stuck = 0;
+            }
+            if self.stuck >= 6 && self.unstick == 0 {
+                self.unstick = 10;
+                self.unstick_dir = (self.rand() - 0.5) * 2.4;
+                self.path.clear();
+            }
+            if self.unstick > 0 {
+                self.unstick -= 1;
+                let ang = a.mv[1].atan2(a.mv[0]) + self.unstick_dir;
+                if moving {
+                    a.mv = [ang.cos(), ang.sin()];
+                }
+                if me.grounded {
+                    a.jump = true;
+                } else if me.energy > 10.0 {
+                    a.boost = true;
+                }
+                if self.unstick == 0 {
+                    self.stuck = 0;
+                }
             }
         }
 

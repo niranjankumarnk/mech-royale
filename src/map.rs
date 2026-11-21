@@ -49,6 +49,9 @@ pub struct Map {
     /// Headroom the mech needs right now (its height plus a margin); set by the brain.
     pub need_h: f32,
     pub surf: Vec<f32>,
+    /// Per cell, one bit per neighbour (order of `NEI`): can a mech walk up or down to it?
+    /// The rise is checked metre by metre on the terrain grid (50 degree slope, 1.2 m ledge).
+    pub edge: Vec<u8>,
     /// 0 = blocked, 1..3 = cells to the nearest blocked cell, 4 = further.
     pub wall_near: Vec<u8>,
     pub comp: Vec<u32>,
@@ -96,6 +99,9 @@ fn ring_of(v: &Value) -> Vec<(f32, f32)> {
     }
     out
 }
+
+/// Index of the opposite direction in `NEI`.
+pub const OPP: [usize; 8] = [1, 0, 3, 2, 7, 6, 5, 4];
 
 pub const NEI: [(isize, isize, u32); 8] = [
     (1, 0, 200),
@@ -308,7 +314,53 @@ impl Map {
             }
             frontier = next;
         }
-        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, clear, need_h: 9.4, surf, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3], roofs: Vec::new(), roof_id: vec![0; n], roof_depth: vec![0; n] };
+        // which neighbours can be walked to: no metre of the way may rise more than a mech climbs
+        let mut edge = vec![0u8; gn];
+        let hv = |vi: isize, vj: isize| -> f32 {
+            let vi = vi.clamp(0, nx as isize - 1) as usize;
+            let vj = vj.clamp(0, ny as isize - 1) as usize;
+            walkh[vj * nx + vi]
+        };
+        for cj in 0..gy as isize {
+            for ci in 0..gx as isize {
+                let mut bits = 0u8;
+                for (k, &(dx, dy, _)) in NEI.iter().enumerate() {
+                    let ni = ci + dx;
+                    let nj = cj + dy;
+                    if ni < 0 || nj < 0 || ni >= gx as isize || nj >= gy as isize {
+                        continue;
+                    }
+                    // heights along the way from this cell's centre to the neighbour's, 1 m apart
+                    // (each sample is the mean of the two vertex rows the centre line runs between)
+                    let mut ok = true;
+                    let mut prev = f32::NAN;
+                    for t in 0..=3isize {
+                        let h = if dy == 0 {
+                            let x = 2 * ci + if dx > 0 { t } else { 1 - t };
+                            0.5 * (hv(x, 2 * cj) + hv(x, 2 * cj + 1))
+                        } else if dx == 0 {
+                            let y = 2 * cj + if dy > 0 { t } else { 1 - t };
+                            0.5 * (hv(2 * ci, y) + hv(2 * ci + 1, y))
+                        } else {
+                            let x = 2 * ci + if dx > 0 { t } else { 1 - t };
+                            let y = 2 * cj + if dy > 0 { t } else { 1 - t };
+                            hv(x, y)
+                        };
+                        let lim = if dx != 0 && dy != 0 { 1.7 } else { 1.25 };
+                        if prev.is_finite() && h - prev > lim {
+                            ok = false;
+                            break;
+                        }
+                        prev = h;
+                    }
+                    if ok {
+                        bits |= 1 << k;
+                    }
+                }
+                edge[cj as usize * gx + ci as usize] = bits;
+            }
+        }
+        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, clear, need_h: 9.4, surf, edge, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3], roofs: Vec::new(), roof_id: vec![0; n], roof_depth: vec![0; n] };
         m.label_components();
         m.find_roofs();
         m
@@ -332,7 +384,7 @@ impl Map {
                 size += 1;
                 let ci = (c % self.gx) as isize;
                 let cj = (c / self.gx) as isize;
-                for &(dx, dy, _) in NEI.iter() {
+                for (k, &(dx, dy, _)) in NEI.iter().enumerate() {
                     let ni = ci + dx;
                     let nj = cj + dy;
                     if ni < 0 || nj < 0 || ni >= self.gx as isize || nj >= self.gy as isize {
@@ -346,7 +398,7 @@ impl Map {
                     if diag && (self.blocked[cj as usize * self.gx + ni as usize] || self.blocked[nj as usize * self.gx + ci as usize]) {
                         continue;
                     }
-                    if !self.can_step(c, nn, diag) || !self.can_step(nn, c, diag) {
+                    if !self.can_step(c, k) || !self.can_step(nn, OPP[k]) {
                         continue;
                     }
                     comp[nn] = next_id;
@@ -460,11 +512,10 @@ impl Map {
         !self.blocked[c] && self.clear[c] >= self.need_h
     }
 
-    /// Can a mech walk from cell a up or down to neighbour b (the slope / ledge rule, kept conservative)?
+    /// Can a mech walk from cell a to its k-th neighbour (order of `NEI`)?
     #[inline]
-    pub fn can_step(&self, a: usize, b: usize, diag: bool) -> bool {
-        let dh = self.surf[b] - self.surf[a];
-        dh <= if diag { 2.6 } else { 1.9 }
+    pub fn can_step(&self, a: usize, k: usize) -> bool {
+        self.edge[a] & (1 << k) != 0
     }
 
     #[inline]
@@ -582,27 +633,26 @@ impl Map {
         true
     }
 
-    /// Can a mech walk the straight segment (every sampled cell free, no step too high)?
+    /// Can a mech walk the straight segment (every sampled cell free, no metre rising too much,
+    /// no big drop)?
     pub fn walk_clear(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
         let dx = x1 - x0;
         let dy = y1 - y0;
         let d = (dx * dx + dy * dy).sqrt();
         let n = d.ceil().max(1.0) as usize;
-        let mut prev = self.cell_of(x0, y0);
+        let mut prev_h = self.ground(x0, y0);
         for s in 1..=n {
             let f = s as f32 / n as f32;
-            let c = self.cell_of(x0 + dx * f, y0 + dy * f);
-            if c == prev {
-                continue;
-            }
-            if !self.passable(c) {
+            let (x, y) = (x0 + dx * f, y0 + dy * f);
+            if !self.passable(self.cell_of(x, y)) {
                 return false;
             }
-            let dh = self.surf[c] - self.surf[prev];
-            if dh > 1.9 || dh < -2.5 {
+            let h = self.ground(x, y);
+            let dh = h - prev_h;
+            if dh > 1.25 || dh < -2.5 {
                 return false;
             }
-            prev = c;
+            prev_h = h;
         }
         true
     }
@@ -731,7 +781,7 @@ impl Planner {
             }
             let ci = (c % m.gx) as isize;
             let cj = (c / m.gx) as isize;
-            for &(dx, dy, cost) in NEI.iter() {
+            for (k, &(dx, dy, cost)) in NEI.iter().enumerate() {
                 let ni = ci + dx;
                 let nj = cj + dy;
                 if ni < 0 || nj < 0 || ni >= gx || nj >= gy {
@@ -745,10 +795,10 @@ impl Planner {
                 if diag && (m.blocked[cj as usize * m.gx + ni as usize] || m.blocked[nj as usize * m.gx + ci as usize]) {
                     continue;
                 }
-                let dh = m.surf[n] - m.surf[c];
-                if dh > if diag { 2.6 } else { 1.9 } {
+                if !m.can_step(c, k) {
                     continue;
                 }
+                let dh = m.surf[n] - m.surf[c];
                 let mut step = cost + extra(n);
                 match m.wall_near[n] {
                     1 => step += 110,
