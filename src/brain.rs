@@ -549,6 +549,11 @@ impl Brain {
                     }
                     Some("kill") => {
                         self.kills += 1;
+                        // Experiment D: forget the dead mech at once. Its stale track made the bot
+                        // skip the cubes it dropped for 10 s and walk away from them.
+                        if let Some(id) = e["target"].as_i64() {
+                            self.mechs.remove(&id);
+                        }
                     }
                     Some("took") | Some("take_failed") => {
                         if let Some(id) = e["id"].as_i64() {
