@@ -212,23 +212,27 @@ struct Act {
     drop: Option<i64>,
 }
 
+// Experiment E: damage first. A bigger magazine is the largest single gain in sustained gun
+// damage (12 rounds then a 2.4 s reload is 107 damage a second; 20 rounds and a 1.9 s reload is
+// 139), then per-shot damage, fire rate and laser charge; toughness comes after.
+// (Versions up to D took armor, plating and nanites first.)
 const UPGRADE_ORDER: [&str; 22] = [
-    "armor",
-    "plating",
-    "nanites",
-    "servos",
-    "laser_damage",
+    "gun_mag",
     "gun_damage",
-    "lightning_efficiency",
+    "laser_damage",
     "gun_rate",
     "laser_charge",
+    "lightning_efficiency",
+    "plating",
+    "armor",
+    "servos",
+    "nanites",
+    "gun_velocity",
     "reactor",
     "capacitor",
     "jets",
     "gyros",
-    "gun_mag",
     "sensors",
-    "gun_velocity",
     "lightning_chain",
     "lightning_range",
     "laser_pierce",

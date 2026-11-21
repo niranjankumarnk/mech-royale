@@ -23,7 +23,7 @@ In order of priority:
      fights it should win.
 4. **Loot.** Takes the nearest laser or lightning (a laser replaces a lightning), collects cubes,
    shoots crates and drones when no mech is near, and goes for a supply drop only when nobody is
-   near it. Upgrades are picked from a fixed survival-first order.
+   near it. Upgrades are picked from a fixed order, damage first.
 5. **Position.** Otherwise holds a covered spot near the edge of the next circle, out of sight of
    every mech it knows about, and keeps its torso scanning.
 
