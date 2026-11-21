@@ -26,10 +26,17 @@ In order of priority:
    near it. Upgrades are picked from a fixed order, damage first.
 5. **Position.** Otherwise holds a covered spot near the edge of the next circle, out of sight of
    every mech it knows about, and keeps its torso scanning.
+6. **Roofs (practice squad only, switch `ROOF` in `src/brain.rs`).** It picks the nearest big flat
+   roof well inside the next circle, jets up one of its walls, and fights from there: it rests in
+   the middle where the ground near the building cannot see it, steps to the edge to shoot down,
+   steps back to reload, and walks off on the side of the next circle when the zone calls. A roof
+   it fails to climb twice is not tried again, and if hunters come up after it and it is losing,
+   it drops off the far side.
 
 Navigation uses the organisers' map (`v2/world.json`, `v2/terrain.i16`, mounted at `/arena`):
 buildings and bridges are rasterised onto a 2 m grid inflated by the mech radius, paths come from
-A*, and a hop-and-jet routine frees the mech when it stops making progress.
+A*, and a hop-and-jet routine frees the mech when it stops making progress. Roofs are found as
+flat groups of building cells at least 9 m deep and 11 to 45 m above the ground.
 
 ## Layout
 
@@ -40,6 +47,7 @@ A*, and a hop-and-jet routine frees the mech when it stops making progress.
 | `src/brain.rs` | memory, zone timing, fight / evade / loot / hold decisions, aiming |
 | `src/bin/sim.rs` | a rough local simulator used only to catch gross bugs (not in the image) |
 | `src/bin/mapcheck.rs` | dev tool: compares the map model with positions taken from public replays (not in the image) |
+| `src/bin/feed.rs` | dev tool: runs the brain over a recorded observation stream and prints its decisions (not in the image) |
 | `Dockerfile` | the submission image |
 
 ## Build, check, run

@@ -64,6 +64,9 @@ struct Mech {
     last_spend_t: f32,
     mv: [f32; 2],
     boost: bool,
+    jump: bool,
+    vz: f32,
+    grounded: bool,
     cmd_aim: [f32; 2],
     fire: [bool; 2],
     tier: usize,
@@ -84,6 +87,10 @@ struct Mech {
     max_stuck: i32,
     cur_stuck: i32,
     seen_t: Vec<f32>,
+    /// seconds spent next to a building whose roof our target stands on (for SIM_CLIMB)
+    wall_t: f32,
+    /// gun shots, gun hits on mechs, laser shots, laser hits on mechs
+    shots: [u32; 4],
 }
 
 struct Proj {
@@ -153,20 +160,23 @@ impl World {
         unreachable!()
     }
 
+    /// Can a mech with its feet at height z stand at (x, y)? Walls are solids rising more than a
+    /// step above the feet anywhere under the body; the surface under the centre must be within a step.
     fn free(&self, x: f32, y: f32, z: f32) -> bool {
         if x < self.map.bx0 + 2.6 || x > self.map.bx1 - 2.6 || y < self.map.by0 + 2.6 || y > self.map.by1 - 2.6 {
             return false;
         }
-        if self.map.is_solid(x, y) {
+        if self.map.support(x, y) - z > 1.2 {
             return false;
         }
         for k in 0..8 {
             let a = k as f32 * TAU / 8.0;
-            if self.map.is_solid(x + 2.4 * a.cos(), y + 2.4 * a.sin()) {
+            let (px, py) = (x + 2.4 * a.cos(), y + 2.4 * a.sin());
+            if self.map.is_solid(px, py) && self.map.support(px, py) - z > 1.2 {
                 return false;
             }
         }
-        self.map.ground(x, y) - z <= 1.2
+        true
     }
 
     fn random_free(&mut self, c: [f32; 2], r: f32) -> [f32; 2] {
@@ -299,8 +309,8 @@ impl World {
         let projs: Vec<Value> = self.projs.iter().filter(|p| p.owner != i as i64 && d2(&p.pos, &m.pos) < 200.0).map(|p| json!({"id": p.id, "kind": p.kind, "pos": p.pos, "vel": p.vel})).collect();
         json!({
             "type": "obs", "tick": self.tick, "t": self.t, "alive": self.mechs.iter().filter(|x| x.alive).count(),
-            "self": {"id": i, "pos": m.pos, "vel": [m.vel[0], m.vel[1], 0.0], "aim": m.aim, "hp": m.hp, "max_hp": m.max_hp, "energy": m.energy, "max_energy": 100,
-                "grounded": true, "cubes": m.cubes, "upgrades": [], "in_zone": d2(&m.pos, &c) <= r,
+            "self": {"id": i, "pos": m.pos, "vel": [m.vel[0], m.vel[1], m.vz], "aim": m.aim, "hp": m.hp, "max_hp": m.max_hp, "energy": m.energy, "max_energy": 100,
+                "grounded": m.grounded, "cubes": m.cubes, "upgrades": [], "in_zone": d2(&m.pos, &c) <= r,
                 "weapons": [{"kind": "gun", "cooldown": m.gun_cd.max(0.0), "ammo": m.ammo, "reload": m.reload.max(0.0), "stats": {"damage": 45, "cooldown": 0.24, "speed": 252, "range": 230, "spread_deg": 0.6, "mag": 12, "reload": 2.4}}, w1],
                 "stats": {"radius": 2.5 * scale, "height": 9.0 * scale, "eye_height": 8.0 * scale, "muzzle_height": 7.0 * scale, "walk_speed": 11.7, "boost_speed": 19.5, "turn_rate": 4, "pitch_rate": 3, "min_pitch": -0.7, "max_pitch": 1.3}},
             "mechs": mechs, "projectiles": projs, "crates": vis(&self.crates, false, true), "cubes": vis(&self.cubes, false, false), "pickups": vis(&self.picks, true, false),
@@ -316,6 +326,7 @@ impl World {
         let n = (mv[0] * mv[0] + mv[1] * mv[1]).sqrt();
         m.mv = if n > 1.0 { [mv[0] / n, mv[1] / n] } else { mv };
         m.boost = a["boost"].as_bool().unwrap_or(false);
+        m.jump = a["jump"].as_bool().unwrap_or(false);
         if a["aim"].is_array() {
             m.cmd_aim = [a["aim"][0].as_f64().unwrap_or(0.0) as f32, (a["aim"][1].as_f64().unwrap_or(0.0) as f32).clamp(-0.7, 1.3)];
         }
@@ -383,6 +394,32 @@ impl World {
                 }
             }
         }
+        // SIM_CLIMB=<seconds>: a hunter that has stood under its target's roof that long appears on the roof
+        if let (Some(j), Ok(secs)) = (target, std::env::var("SIM_CLIMB")) {
+            let secs: f32 = secs.parse().unwrap_or(3.0);
+            let tp = self.mechs[j].pos;
+            if let Some((r, _)) = self.map.roof_at(tp[0], tp[1]) {
+                if (tp[2] - self.map.roofs[r].top).abs() < 2.0 && me.pos[2] < self.map.roofs[r].top - 3.0 && d2(&tp, &me.pos) < 70.0 {
+                    self.mechs[i].wall_t += 0.1;
+                    if self.mechs[i].wall_t > secs {
+                        // first roof point on the way to the target
+                        let d = d2(&tp, &me.pos).max(0.1);
+                        let u = [(tp[0] - me.pos[0]) / d, (tp[1] - me.pos[1]) / d];
+                        let mut sdist = 1.0;
+                        while sdist < d {
+                            let p = [me.pos[0] + u[0] * sdist, me.pos[1] + u[1] * sdist];
+                            if matches!(self.map.roof_at(p[0], p[1]), Some((rr, dep)) if rr == r && dep >= 3.0) {
+                                self.mechs[i].pos = [p[0], p[1], self.map.roofs[r].top];
+                                self.mechs[i].wall_t = 0.0;
+                                break;
+                            }
+                            sdist += 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        let me = self.mechs[i].clone();
         let mut goal = me.hold;
         let depth = nr - d2(&me.pos, &nc);
         let zone_urgent = depth < 0.3 * nr && t > s - 25.0;
@@ -483,6 +520,7 @@ impl World {
         m.cmd_aim = aim;
         m.fire = fire;
         m.boost = false;
+        m.jump = false;
         // "looting": better bots find a second weapon after a while
         if m.slot1.is_none() && t > 15.0 + 10.0 * (3 - m.tier.min(3)) as f32 && m.tier >= 1 {
             let r = self.rng.f();
@@ -516,41 +554,71 @@ impl World {
                     }
                 }
             }
-            // move
-            let (pos, mut vel, mv, boost, charging, energy) = {
+            // move (horizontal with wall sliding; vertical with jump, jet and gravity)
+            let (pos, mut vel, mv, boost, charging, energy, jump, mut vz, mut grounded) = {
                 let m = &self.mechs[i];
-                (m.pos, m.vel, m.mv, m.boost, m.charge > 0.0, m.energy)
+                (m.pos, m.vel, m.mv, m.boost, m.charge > 0.0, m.energy, m.jump, m.vz, m.grounded)
             };
             let moving = mv[0].abs() + mv[1].abs() > 0.05;
-            let boosting = boost && energy > 0.5 && moving;
-            let mut sp = if boosting { 19.5 } else { 11.7 };
+            let running = boost && energy > 0.5 && moving && grounded;
+            let jetting = boost && energy > 0.2 && !grounded;
+            let mut sp = if running { 19.5 } else { 11.7 };
             if charging {
                 sp *= 0.5;
             }
             let want = [mv[0] * sp, mv[1] * sp];
             let dv = [want[0] - vel[0], want[1] - vel[1]];
             let dn = (dv[0] * dv[0] + dv[1] * dv[1]).sqrt();
-            let maxd = 58.5 * DT;
+            let maxd = if grounded { 58.5 } else { 12.0 } * DT;
             if dn > maxd {
                 vel = [vel[0] + dv[0] / dn * maxd, vel[1] + dv[1] / dn * maxd];
             } else {
                 vel = want;
             }
+            if jump && grounded {
+                vz = 11.0;
+                grounded = false;
+            }
+            if !grounded {
+                if jetting {
+                    vz += 34.0 * DT;
+                }
+                vz -= 22.0 * DT;
+                if jetting {
+                    vz = vz.min(10.0);
+                }
+            }
             let nx = pos[0] + vel[0] * DT;
             let ny = pos[1] + vel[1] * DT;
             let mut np = pos;
             if self.free(nx, ny, pos[2]) {
-                np = [nx, ny, 0.0];
+                np = [nx, ny, pos[2]];
             } else if self.free(nx, pos[1], pos[2]) {
-                np = [nx, pos[1], 0.0];
+                np = [nx, pos[1], pos[2]];
                 vel[1] = 0.0;
             } else if self.free(pos[0], ny, pos[2]) {
-                np = [pos[0], ny, 0.0];
+                np = [pos[0], ny, pos[2]];
                 vel[0] = 0.0;
             } else {
                 vel = [0.0, 0.0];
             }
-            np[2] = self.map.ground(np[0], np[1]);
+            let sup = self.map.support(np[0], np[1]);
+            if grounded {
+                if sup < np[2] - 1.2 {
+                    grounded = false; // walked off an edge
+                    vz = 0.0;
+                } else {
+                    np[2] = sup;
+                }
+            } else {
+                np[2] += vz * DT;
+                if np[2] <= sup {
+                    np[2] = sup;
+                    vz = 0.0;
+                    grounded = true;
+                }
+            }
+            let boosting = running || jetting;
             {
                 let m = &mut self.mechs[i];
                 let spd = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
@@ -563,8 +631,10 @@ impl World {
                 }
                 m.pos = np;
                 m.vel = vel;
+                m.vz = vz;
+                m.grounded = grounded;
                 if boosting {
-                    m.energy = (m.energy - 17.0 * DT).max(0.0);
+                    m.energy = (m.energy - if jetting { 15.0 } else { 17.0 } * DT).max(0.0);
                     m.last_spend_t = t;
                 } else if t - m.last_spend_t > 0.6 {
                     m.energy = (m.energy + 18.0 * DT).min(100.0);
@@ -600,6 +670,7 @@ impl World {
                 self.next_id += 1;
                 self.projs.push(Proj { id: self.next_id, owner: i as i64, pos: muzzle, vel: [d[0] * 252.0, d[1] * 252.0, d[2] * 252.0], dmg: 45.0, ttl: 230.0 / 252.0, kind: "gun" });
                 let mm = &mut self.mechs[i];
+                mm.shots[0] += 1;
                 mm.gun_cd = 0.24;
                 mm.ammo -= 1;
                 if mm.ammo == 0 {
@@ -614,6 +685,7 @@ impl World {
                         let frac = 0.35 + 0.65 * (m.charge / 0.75).min(1.0);
                         self.mechs[i].charge = 0.0;
                         self.mechs[i].w1_cd = 1.65;
+                        self.mechs[i].shots[2] += 1;
                         // hitscan: first mech / drone / crate along the ray
                         let mut best: Option<(f32, i64)> = None;
                         let test = |pos: [f32; 3], r: f32, h: f32, id: i64, best: &mut Option<(f32, i64)>| {
@@ -643,6 +715,9 @@ impl World {
                         if let Some((along, id)) = best {
                             let hitp = [muzzle[0] + dir[0] * along, muzzle[1] + dir[1] * along, muzzle[2] + dir[2] * along];
                             if self.map.los(muzzle, hitp) {
+                                if id < 100 {
+                                    self.mechs[i].shots[3] += 1;
+                                }
                                 self.hit_id(id, 315.0 * frac, "laser", i as i64, [m.pos[0], m.pos[1]]);
                             }
                         }
@@ -758,6 +833,9 @@ impl World {
                 }
             }
             if let Some((_, id)) = hit {
+                if id < 100 && owner >= 0 && owner < 100 {
+                    self.mechs[owner as usize].shots[1] += 1;
+                }
                 self.hit_id(id, dmg, kind, owner, [prev[0] - vel[0], prev[1] - vel[1]]);
                 dead = true;
             }
@@ -821,7 +899,9 @@ fn main() {
     let ffa = args.get(4).map_or(false, |s| s == "ffa");
     let mine: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
     let verbose = args.get(6).is_some();
+    let trace_idx: usize = std::env::var("SIM_TRACE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut total = 0.0;
+    let mut acc = [0u32; 4];
     let mut worst_ms = 0.0f64;
     let mut times: Vec<f32> = Vec::new();
     for mi in 0..matches {
@@ -854,13 +934,20 @@ fn main() {
             let p = w.random_free([41.3, -72.8], 400.0);
             spawns.push(p);
         }
+        // SIM_SPAWN="x,y" puts our first bot at a chosen place (for example inside the stadium bowl)
+        if let Ok(sp) = std::env::var("SIM_SPAWN") {
+            let v: Vec<f32> = sp.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if v.len() == 2 {
+                spawns[0] = [v[0], v[1]];
+            }
+        }
         // put our bots on random slots' spawns
         for i in 0..16usize {
             let p = spawns[i];
-            let z = w.map.ground(p[0], p[1]);
+            let z = w.map.support(p[0], p[1]);
             let tier = if i < mine { 3 } else { [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3][(i - mine) % 15] };
             let yaw = w.rng.f() * TAU - PI;
-            w.mechs.push(Mech { pos: [p[0], p[1], z], vel: [0.0; 2], aim: [yaw, 0.0], hp: 1400.0, max_hp: 1400.0, energy: 100.0, alive: true, cubes: 0, gun_cd: 0.0, ammo: 12, reload: 0.0, slot1: None, w1_cd: 0.0, charge: 0.0, last_dmg_t: -10.0, last_spend_t: -10.0, mv: [0.0; 2], boost: false, cmd_aim: [yaw, 0.0], fire: [false; 2], tier, path: Vec::new(), path_t: 0.0, strafe: 1.0, strafe_t: 0.0, noise: [0.0; 2], noise_t: 0.0, hold: p, kills: 0, death_t: -1.0, killed_by: String::new(), dmg_zone: 0.0, dmg_taken: 0.0, dmg_dealt: 0.0, stuck: 0, max_stuck: 0, cur_stuck: 0, seen_t: vec![-100.0; 16] });
+            w.mechs.push(Mech { pos: [p[0], p[1], z], vel: [0.0; 2], aim: [yaw, 0.0], hp: 1400.0, max_hp: 1400.0, energy: 100.0, alive: true, cubes: 0, gun_cd: 0.0, ammo: 12, reload: 0.0, slot1: None, w1_cd: 0.0, charge: 0.0, last_dmg_t: -10.0, last_spend_t: -10.0, mv: [0.0; 2], boost: false, jump: false, vz: 0.0, grounded: true, cmd_aim: [yaw, 0.0], fire: [false; 2], tier, path: Vec::new(), path_t: 0.0, strafe: 1.0, strafe_t: 0.0, noise: [0.0; 2], noise_t: 0.0, hold: p, kills: 0, death_t: -1.0, killed_by: String::new(), dmg_zone: 0.0, dmg_taken: 0.0, dmg_dealt: 0.0, stuck: 0, max_stuck: 0, cur_stuck: 0, seen_t: vec![-100.0; 16], wall_t: 0.0, shots: [0; 4] });
         }
         for k in 0..12 {
             let p = w.random_free([41.3, -72.8], 480.0);
@@ -912,12 +999,12 @@ fn main() {
                         }
                         times.push(ms as f32);
                         assert_eq!(act["tick"], obs["tick"]);
-                        if i == 0 {
-                            *labels.entry(brains[0].label).or_insert(0) += 1;
+                        if i == trace_idx {
+                            *labels.entry(brains[i].label).or_insert(0) += 1;
                             if verbose && std::env::var_os("MECH_DEBUG").is_some() && w.tick % 10 == 0 {
-                                let m = &w.mechs[0];
+                                let m = &w.mechs[i];
                                 let (c, r, nc, nr, _, _, _) = w.zone(w.t);
-                                trace.push(format!("t={:5.1} pos=({:6.1},{:6.1}) {} zin={:5.1} nin={:5.1} | {}", w.t, m.pos[0], m.pos[1], brains[0].label, r - d2(&m.pos, &c), nr - d2(&m.pos, &nc), brains[0].dbg));
+                                trace.push(format!("t={:5.1} pos=({:6.1},{:6.1},{:5.1}) g={} e={:3.0} {} zin={:5.1} nin={:5.1} | {}", w.t, m.pos[0], m.pos[1], m.pos[2], m.grounded as u8, m.energy, brains[i].label, r - d2(&m.pos, &c), nr - d2(&m.pos, &nc), brains[i].dbg));
                             }
                             if verbose && w.tick % 100 == 0 {
                                 let m = &w.mechs[0];
@@ -953,6 +1040,9 @@ fn main() {
             let m = &w.mechs[i];
             let pts = 16 - place[i];
             total += pts as f32;
+            for k in 0..4 {
+                acc[k] += m.shots[k];
+            }
             println!("match {} seed {} bot {}: place {:2} pts {:2} kills {} death_t {:6.1} by {:14} dealt {:6.0} taken {:6.0} zone_dmg {:5.0} stuck_ticks {} max_stuck {} w1 {:?} cubes {} labels {:?}", mi, seed, i, place[i], pts, m.kills, m.death_t, m.killed_by, m.dmg_dealt, m.dmg_taken, m.dmg_zone, m.stuck, m.max_stuck, m.slot1, m.cubes, if i == 0 { format!("{:?}", labels) } else { String::new() });
         }
         println!("   prof ms (ingest, spot, loot, astar, total): {:?}", brains[0].prof);
@@ -966,6 +1056,7 @@ fn main() {
         let txt: Vec<String> = times.iter().map(|x| format!("{:.4}", x)).collect();
         let _ = std::fs::write(path, txt.join("\n"));
     }
+    println!("our gun: {} shots, {} hits on mechs ({:.0}%, shots at crates and drones count as misses); laser: {} shots, {} hits on mechs ({:.0}%)", acc[0], acc[1], 100.0 * acc[1] as f32 / acc[0].max(1) as f32, acc[2], acc[3], 100.0 * acc[3] as f32 / acc[2].max(1) as f32);
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f32| times[((times.len() as f32 - 1.0) * p) as usize];
     println!("mean points {:.2} over {} bot-matches; decision ms p50 {:.3} p99 {:.3} p99.9 {:.3} max {:.2}; over 5 ms: {} of {}", total / (matches as f32 * mine as f32), matches as usize * mine, pct(0.5), pct(0.99), pct(0.999), worst_ms, times.iter().filter(|x| **x > 5.0).count(), times.len());

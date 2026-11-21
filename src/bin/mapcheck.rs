@@ -28,6 +28,37 @@ fn main() {
         }
         return;
     }
+    if std::env::args().nth(3).as_deref() == Some("roofs") {
+        println!("{} usable roofs", m.roofs.len());
+        let mut rs: Vec<&mechbot::map::Roof> = m.roofs.iter().collect();
+        rs.sort_by(|a, b| b.area.cmp(&a.area));
+        for r in rs.iter().take(60) {
+            println!("  top {:6.1} climb {:5.1} m  area {:6} m2  centre ({:7.1},{:7.1}) depth {:4.1} m", r.top, r.top - r.ground, r.area, r.center[0], r.center[1], r.depth);
+        }
+        // compare with replay samples: stdin lines "x y z grounded"
+        let (mut n, mut close, mut on_listed) = (0u32, 0u32, 0u32);
+        let mut diffs: Vec<f32> = Vec::new();
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            let v: Vec<f32> = line.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            if v.len() < 4 || v[3] < 0.5 || !m.is_solid(v[0], v[1]) || v[2] < m.ground(v[0], v[1]) + 3.0 {
+                continue;
+            }
+            n += 1;
+            let d = v[2] - m.support(v[0], v[1]);
+            diffs.push(d);
+            if d.abs() < 0.6 {
+                close += 1;
+            }
+            if m.roof_at(v[0], v[1]).is_some() {
+                on_listed += 1;
+            }
+        }
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if n > 0 {
+            println!("replay samples standing on solids: {}  within 0.6 m of my roof height: {} ({:.0}%)  on a listed roof: {} ({:.0}%)  z - my roof: p10 {:.1} p50 {:.1} p90 {:.1}", n, close, 100.0 * close as f32 / n as f32, on_listed, 100.0 * on_listed as f32 / n as f32, diffs[diffs.len() / 10], diffs[diffs.len() / 2], diffs[diffs.len() * 9 / 10]);
+        }
+        return;
+    }
     if std::env::args().nth(3).as_deref() == Some("label") {
         // per input line: comp id (0 = blocked cell), is_main, solid, my ground height
         let mut out = String::new();

@@ -212,6 +212,20 @@ struct Act {
     drop: Option<i64>,
 }
 
+/// Experiment R: against the practice squad, fight from a roof. Climb the nearest big flat roof,
+/// stand where the ground near the building cannot see us, step to the edge to shoot, step back
+/// to reload, and come down when the zone says so.
+const ROOF: bool = true;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RoofSt {
+    Off,
+    Approach,
+    Climb,
+    On,
+    Leave,
+}
+
 // Experiment E: damage first. A bigger magazine is the largest single gain in sustained gun
 // damage (12 rounds then a 2.4 s reload is 107 damage a second; 20 rounds and a 1.9 s reload is
 // 139), then per-shot damage, fire rate and laser charge; toughness comes after.
@@ -302,6 +316,22 @@ pub struct Brain {
     fight_until: f32,
     evade_until: f32,
     dcount: i64,
+    /// When this decision started (for the time guard).
+    tick_start: std::time::Instant,
+    roof_st: RoofSt,
+    roof: usize,
+    roof_foot: [f32; 2],
+    roof_land: [f32; 2],
+    roof_t0: f32,
+    roof_pick_t: f32,
+    roof_ban: f32,
+    roof_fails: i32,
+    /// Roofs we failed to climb: not tried again this match.
+    roof_bad: Vec<usize>,
+    roof_dir: [f32; 2],
+    roof_still: i32,
+    patrol_k: usize,
+    patrol_t: f32,
     /// Set when the zone forces a move; cleared only once we are properly inside the next circle.
     zone_latch: bool,
     /// False while every death so far was our own kill: the practice format (one squad of house
@@ -379,6 +409,20 @@ impl Brain {
             fight_until: -1.0,
             evade_until: -1.0,
             dcount: 0,
+            tick_start: std::time::Instant::now(),
+            roof_st: RoofSt::Off,
+            roof: 0,
+            roof_foot: [0.0, 0.0],
+            roof_land: [0.0, 0.0],
+            roof_t0: 0.0,
+            roof_pick_t: -100.0,
+            roof_ban: -1.0,
+            roof_fails: 0,
+            roof_bad: Vec::new(),
+            roof_dir: [1.0, 0.0],
+            roof_still: 0,
+            patrol_k: 0,
+            patrol_t: 0.0,
             zone_latch: false,
             ffa: false,
             kills: 0,
@@ -849,7 +893,10 @@ impl Brain {
             return;
         }
         let need = self.path.is_empty() || self.dcount - self.path_tick >= 3 || d2(&self.path_goal, &goal) > 4.0;
-        if need {
+        // time guard: a search costs up to about 2 ms; if this decision has already been slow
+        // (a busy scorer), keep following the path we have rather than risk the 50 ms budget
+        let late = self.tick_start.elapsed().as_millis() >= 12 && !self.path.is_empty();
+        if need && !late {
             let sc = self.map.nearest_free(self.map.cell_of(x, y), 5, false);
             let on_main = sc.map_or(false, |c| self.map.comp[c] == self.map.main_comp);
             let gc = self.map.nearest_free(self.map.cell_of(goal[0], goal[1]), 12, on_main);
@@ -942,6 +989,207 @@ impl Brain {
         }
     }
 
+    // ------------------------------------------------------------------ roofs
+    /// A place to climb roof `r` from: a free ground spot a few metres outside one of its edges
+    /// with nothing but that roof's own wall in between, and the landing spot just inside the edge.
+    fn roof_access(&self, r: usize, from: [f32; 2]) -> Option<([f32; 2], [f32; 2])> {
+        let m = &self.map;
+        let rf = &m.roofs[r];
+        let mut best: Option<(f32, [f32; 2], [f32; 2])> = None;
+        for k in 0..32 {
+            let ang = k as f32 * TAU / 32.0;
+            let (sn, cs) = ang.sin_cos();
+            let mut d = 0.0f32;
+            let mut edge = None;
+            while d < 160.0 {
+                match m.roof_at(rf.center[0] + cs * d, rf.center[1] + sn * d) {
+                    Some((rr, _)) if rr == r => {}
+                    _ => {
+                        edge = Some(d - 1.0);
+                        break;
+                    }
+                }
+                d += 1.0;
+            }
+            let de = match edge {
+                Some(e) if e > 5.0 => e,
+                _ => continue,
+            };
+            let land = [rf.center[0] + cs * (de - 4.0), rf.center[1] + sn * (de - 4.0)];
+            if m.roof_at(land[0], land[1]).map(|x| x.0) != Some(r) {
+                continue;
+            }
+            for out in [5.0f32, 6.5, 8.0] {
+                let f = [rf.center[0] + cs * (de + out), rf.center[1] + sn * (de + out)];
+                let cell = m.cell_of(f[0], f[1]);
+                if !m.passable(cell) || m.comp[cell] != m.main_comp {
+                    continue;
+                }
+                let climb = rf.top - m.ground(f[0], f[1]);
+                if !(8.0..=48.0).contains(&climb) {
+                    continue;
+                }
+                // only this roof's own wall between the foot and the edge
+                let mut clean = true;
+                let mut q = de + out - 1.0;
+                while q > de + 1.5 {
+                    if m.is_solid(rf.center[0] + cs * q, rf.center[1] + sn * q) {
+                        clean = false;
+                        break;
+                    }
+                    q -= 1.0;
+                }
+                if !clean {
+                    continue;
+                }
+                let cost = d2(&f, &from);
+                if best.map_or(true, |b| cost < b.0) {
+                    best = Some((cost, f, land));
+                }
+                break;
+            }
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
+    /// The best roof to fight from right now: near, deep, tall enough, and well inside the next circle.
+    fn pick_roof(&self) -> Option<(usize, [f32; 2], [f32; 2])> {
+        let me_p = [self.me.pos[0], self.me.pos[1]];
+        let z = &self.zone;
+        let zm = self.zm();
+        let m = &self.map;
+        let t = self.t;
+        let mut cands: Vec<(f32, usize)> = Vec::new();
+        for (i, rf) in m.roofs.iter().enumerate() {
+            if self.roof_bad.contains(&i) {
+                continue;
+            }
+            let c = rf.center;
+            if c[0] < m.bx0 + 20.0 || c[0] > m.bx1 - 20.0 || c[1] < m.by0 + 20.0 || c[1] > m.by1 - 20.0 {
+                continue;
+            }
+            let d = d2(&c, &me_p);
+            if d > 260.0 {
+                continue;
+            }
+            let depth_next = z.nr - d2(&c, &z.nc);
+            if depth_next < zm + 12.0 || d2(&c, &z.c) > z.r - 20.0 {
+                continue;
+            }
+            let h = rf.top - rf.ground;
+            let mut s = -d + rf.depth.min(25.0) * 2.0 + (h.min(25.0) - 12.0) * 1.5 + depth_next.min(120.0) * 0.25;
+            for tr in self.mechs.values() {
+                if t - tr.seen_t < 10.0 && d2(&tr.pos, &c) < 60.0 {
+                    s -= 40.0;
+                }
+            }
+            cands.push((s, i));
+        }
+        cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (_, i) in cands.iter().take(4) {
+            if let Some((foot, land)) = self.roof_access(*i, me_p) {
+                return Some((*i, foot, land));
+            }
+        }
+        None
+    }
+
+    /// Step toward a point on our roof without getting closer than `min_depth` to an edge.
+    fn roof_move(&self, a: &mut Act, to: [f32; 2], min_depth: f32) {
+        let x = self.me.pos[0];
+        let y = self.me.pos[1];
+        let d = d2(&to, &[x, y]);
+        if d < 1.0 {
+            a.mv = [0.0, 0.0];
+            return;
+        }
+        let u = [(to[0] - x) / d, (to[1] - y) / d];
+        for sdist in [1.5f32, 3.0] {
+            match self.map.roof_at(x + u[0] * sdist, y + u[1] * sdist) {
+                Some((r, dep)) if r == self.roof && dep >= min_depth => {}
+                _ => {
+                    a.mv = [0.0, 0.0];
+                    return;
+                }
+            }
+        }
+        let k = (d / 3.0).min(1.0).max(0.4);
+        a.mv = [u[0] * k, u[1] * k];
+    }
+
+    /// The spot on our roof from which to look down at `tp`: toward it, 3 m short of the edge.
+    fn roof_peek(&self, tp: [f32; 3]) -> [f32; 2] {
+        let x = self.me.pos[0];
+        let y = self.me.pos[1];
+        let d = d2(&tp, &[x, y]).max(0.01);
+        let u = [(tp[0] - x) / d, (tp[1] - y) / d];
+        let mut best = [x, y];
+        let mut sdist = 1.0;
+        while sdist < d.min(120.0) {
+            let p = [x + u[0] * sdist, y + u[1] * sdist];
+            match self.map.roof_at(p[0], p[1]) {
+                Some((r, dep)) if r == self.roof && dep >= 3.0 => best = p,
+                _ => break,
+            }
+            sdist += 1.0;
+        }
+        best
+    }
+
+    /// Strafe on the roof across the line to the target, never nearer than `keep` to an edge.
+    fn roof_jink(&mut self, a: &mut Act, tp: [f32; 3], keep: f32) {
+        let x = self.me.pos[0];
+        let y = self.me.pos[1];
+        let d = d2(&tp, &[x, y]).max(0.01);
+        let u = [(tp[0] - x) / d, (tp[1] - y) / d];
+        if self.t > self.strafe_until {
+            self.strafe_dir = if self.rand() < 0.5 { 1.0 } else { -1.0 };
+            self.strafe_until = self.t + 0.35 + self.rand() * 0.45;
+        }
+        for sd in [self.strafe_dir, -self.strafe_dir] {
+            let v = [-sd * u[1], sd * u[0]];
+            let ok = [2.0f32, 4.5].iter().all(|sdist| matches!(self.map.roof_at(x + v[0] * sdist, y + v[1] * sdist), Some((r, dep)) if r == self.roof && dep >= keep));
+            if ok {
+                a.mv = v;
+                self.strafe_dir = sd;
+                return;
+            }
+        }
+        a.mv = [0.0, 0.0];
+    }
+
+    /// Direction in which to walk off our roof: toward `goal` if that edge drops to the ground.
+    fn roof_exit_dir(&self, goal: [f32; 2]) -> [f32; 2] {
+        let x = self.me.pos[0];
+        let y = self.me.pos[1];
+        let top = self.map.roofs[self.roof].top;
+        let base = (goal[1] - y).atan2(goal[0] - x);
+        for off in [0.0f32, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6, 2.2, -2.2, PI] {
+            let ang = base + off;
+            let u = [ang.cos(), ang.sin()];
+            // walk to the edge, then make sure the far side is lower and stays lower
+            let mut sdist = 1.0;
+            let mut edge = None;
+            while sdist < 200.0 {
+                match self.map.roof_at(x + u[0] * sdist, y + u[1] * sdist) {
+                    Some((r, _)) if r == self.roof => {}
+                    _ => {
+                        edge = Some(sdist);
+                        break;
+                    }
+                }
+                sdist += 1.0;
+            }
+            if let Some(e) = edge {
+                let clear = [1.0f32, 3.0, 5.0, 7.0].iter().all(|q| self.map.support(x + u[0] * (e + q), y + u[1] * (e + q)) < top - 3.0);
+                if clear {
+                    return u;
+                }
+            }
+        }
+        [base.cos(), base.sin()]
+    }
+
     fn fight_move(&mut self, a: &mut Act, tp: [f32; 3], want: f32) {
         let x = self.me.pos[0];
         let y = self.me.pos[1];
@@ -995,7 +1243,7 @@ impl Brain {
         [dy.atan2(dx), dz.atan2(h)]
     }
 
-    fn aim_fire(&mut self, a: &mut Act, tg: &Tgt, allow_laser: bool) {
+    fn aim_fire(&mut self, a: &mut Act, tg: &Tgt, allow_laser: bool, precharge: bool) {
         let me = self.me.clone();
         let muzzle = [me.pos[0], me.pos[1], me.pos[2] + me.muzzle_h];
         let tc = [tg.pos[0], tg.pos[1], tg.pos[2] + tg.h * 0.5];
@@ -1026,7 +1274,7 @@ impl Brain {
                         } else {
                             a.fire[i] = true;
                         }
-                    } else if allow_laser && los && dist < w.range - 8.0 && w.cooldown <= 0.12 {
+                    } else if allow_laser && (los || precharge) && dist < w.range - 8.0 && w.cooldown <= 0.12 {
                         a.fire[i] = true;
                     }
                 }
@@ -1068,6 +1316,7 @@ impl Brain {
     // ------------------------------------------------------------------ the decision
     pub fn decide(&mut self, o: &Value) -> Value {
         let t_start = std::time::Instant::now();
+        self.tick_start = t_start;
         self.ingest(o);
         self.prof[0] = self.prof[0].max(t_start.elapsed().as_secs_f32() * 1000.0);
         self.dcount += 1;
@@ -1221,6 +1470,59 @@ impl Brain {
             evade = true;
         }
 
+        // ---- roof bookkeeping (practice squad only)
+        let roof_ok = ROOF && !self.ffa;
+        let on_roof_now: Option<(usize, f32)> = match self.map.roof_at(me.pos[0], me.pos[1]) {
+            Some((r, dep)) if (me.pos[2] - self.map.roofs[r].top).abs() < 1.5 => Some((r, dep)),
+            _ => None,
+        };
+        match self.roof_st {
+            RoofSt::On => {
+                // still up there? (being in the air just above it counts)
+                let above = self.map.roof_at(me.pos[0], me.pos[1]).map(|x| x.0) == Some(self.roof) && me.pos[2] > self.map.roofs[self.roof].top - 1.0;
+                if !above || !roof_ok {
+                    self.roof_st = RoofSt::Off;
+                }
+            }
+            RoofSt::Leave => {
+                if (on_roof_now.is_none() && me.grounded) || t - self.roof_t0 > 8.0 {
+                    self.roof_st = RoofSt::Off;
+                }
+            }
+            RoofSt::Approach | RoofSt::Climb => {
+                if !roof_ok {
+                    self.roof_st = RoofSt::Off;
+                }
+            }
+            RoofSt::Off => {}
+        }
+        // choose a roof to fight from
+        if roof_ok && self.roof_st == RoofSt::Off && t >= self.roof_ban && t - self.roof_pick_t >= 3.0 && !urgent {
+            self.roof_pick_t = t;
+            if let Some((r, foot, land)) = self.pick_roof() {
+                self.roof = r;
+                self.roof_foot = foot;
+                self.roof_land = land;
+                self.roof_st = RoofSt::Approach;
+                self.roof_t0 = t;
+            }
+        }
+        if self.roof_st == RoofSt::Approach {
+            // give up on a roof the zone is about to leave behind, or that takes too long to reach
+            let c = self.map.roofs[self.roof].center;
+            if z.nr - d2(&c, &z.nc) < zm + 6.0 || t - self.roof_t0 > 60.0 {
+                self.roof_st = RoofSt::Off;
+                self.roof_ban = t + 5.0;
+            }
+        }
+        let mut roof_tgt: Option<Th> = None;
+        let mut roof_hidden = false;
+        // a weapon we still need lying close by on the ground is worth a detour before going up
+        let weapon_near = me.w.iter().any(|w| w.is_none())
+            && self.pickups.values().any(|it| {
+                matches!(it.kind, Some(k) if k != WK::Mortar && !have(k)) && d2(&it.pos, &me.pos) < 90.0 && (it.pos[2] - self.map.ground(it.pos[0], it.pos[1])).abs() < 3.0
+            });
+
         // ---- movement goal
         let mut label = "hold";
         let mut loot: Option<Loot> = None;
@@ -1238,13 +1540,142 @@ impl Brain {
             }
             b.spot
         };
-        if urgent {
+        if self.roof_st == RoofSt::Leave {
+            // walking off the roof: keep going until we are down
+            label = "down";
+            self.loot = None;
+            a.mv = self.roof_dir;
+            // held up by something on the way to the edge: hop, and try a little to one side
+            let sp = (me.vel[0] * me.vel[0] + me.vel[1] * me.vel[1]).sqrt();
+            if sp < 1.0 && me.grounded {
+                self.roof_still += 1;
+            } else {
+                self.roof_still = 0;
+            }
+            if self.roof_still >= 8 {
+                self.roof_still = 0;
+                a.jump = true;
+                let (sn, cs) = 0.8f32.sin_cos();
+                self.roof_dir = [self.roof_dir[0] * cs - self.roof_dir[1] * sn, self.roof_dir[0] * sn + self.roof_dir[1] * cs];
+            }
+        } else if urgent {
             label = "zone";
             self.loot = None;
             let g = if z.nr < 10.0 { Some(z.nc) } else { want_spot(self, false) };
             let g = g.unwrap_or(z.nc);
-            self.go_to(&mut a, g, 1.5, false);
-            a.boost = me.energy > 8.0 && (!me.in_zone || (t_out - t) < need * 0.6);
+            if self.roof_st == RoofSt::On {
+                // the zone calls: off the roof on the side of the next circle
+                self.roof_dir = self.roof_exit_dir(g);
+                self.roof_st = RoofSt::Leave;
+                self.roof_t0 = t;
+                a.mv = self.roof_dir;
+            } else {
+                self.roof_st = RoofSt::Off;
+                self.go_to(&mut a, g, 1.5, false);
+            }
+            a.boost = me.energy > 8.0 && me.grounded && (!me.in_zone || (t_out - t) < need * 0.6);
+        } else if self.roof_st == RoofSt::Climb {
+            // committed: up the wall and onto the roof
+            label = "climb";
+            self.loot = None;
+            let rf = self.map.roofs[self.roof].clone();
+            let to = self.roof_land;
+            let dd = d2(&to, &me_p).max(0.01);
+            a.mv = [(to[0] - me_p[0]) / dd, (to[1] - me_p[1]) / dd];
+            if me.grounded {
+                a.jump = true;
+            } else {
+                a.boost = me.pos[2] < rf.top + 1.2 && me.energy > 0.5;
+            }
+            if on_roof_now.map(|x| x.0) == Some(self.roof) && me.grounded {
+                self.roof_st = RoofSt::On;
+                self.roof_t0 = t;
+                self.roof_fails = 0;
+                self.patrol_t = t;
+            } else if t - self.roof_t0 > 9.0 || (me.grounded && t - self.roof_t0 > 1.5 && me.energy < 6.0) {
+                // did not make it: try once more, then never this roof again
+                self.roof_fails += 1;
+                self.roof_st = RoofSt::Off;
+                self.roof_ban = t + 6.0;
+                if self.roof_fails >= 2 {
+                    self.roof_bad.push(self.roof);
+                    self.roof_fails = 0;
+                }
+            }
+        } else if self.roof_st == RoofSt::On {
+            label = "roof";
+            self.loot = None;
+            let rf = self.map.roofs[self.roof].clone();
+            let my_depth = on_roof_now.map(|x| x.1).unwrap_or(0.0);
+            let roof = self.roof;
+            let on_it = |h: &Th| self.map.roof_at(h.pos[0], h.pos[1]).map(|x| x.0) == Some(roof) && (h.pos[2] - rf.top).abs() < 3.0;
+            let up: Vec<Th> = ths.iter().filter(|h| on_it(h)).cloned().collect();
+            let key = |h: &Th| h.hp + 3.0 * h.d;
+            let vis = ths.iter().filter(|h| h.los && h.d < 235.0).cloned().min_by(|x, y| key(x).partial_cmp(&key(y)).unwrap_or(std::cmp::Ordering::Equal));
+            let trk = ths.iter().filter(|h| !h.los && h.d < 170.0).cloned().min_by(|x, y| x.d.partial_cmp(&y.d).unwrap_or(std::cmp::Ordering::Equal));
+            let mut ready = false;
+            for w in me.w.iter().flatten() {
+                match w.kind {
+                    WK::Gun => ready |= w.reload <= 0.7,
+                    WK::Laser => ready |= w.cooldown <= 0.0 && w.charge >= w.charge_t - 0.5,
+                    WK::Lightning => ready |= vis.map_or(false, |h| h.d < w.range) && me.energy > 15.0,
+                    _ => {}
+                }
+            }
+            if up.len() >= 2 || (!up.is_empty() && hpf < 0.35) {
+                // they came up after us and we are losing: off the far side
+                let e = up[0].pos;
+                let goal = [me_p[0] + (me_p[0] - e[0]) * 3.0, me_p[1] + (me_p[1] - e[1]) * 3.0];
+                self.roof_dir = self.roof_exit_dir(goal);
+                self.roof_st = RoofSt::Leave;
+                self.roof_t0 = t;
+                self.roof_ban = t + 25.0;
+                a.mv = self.roof_dir;
+            } else if let Some(h) = vis {
+                roof_tgt = Some(h);
+                if up.is_empty() && (hpf < 0.4 || (!ready && my_depth < 9.0)) {
+                    // hurt, or reloading at the edge: step back out of sight
+                    self.roof_move(&mut a, rf.center, 3.0);
+                } else {
+                    self.roof_jink(&mut a, h.pos, if my_depth < 6.0 { 3.0 } else { 5.0 });
+                }
+            } else if trk.is_some() && ready && hpf > 0.5 {
+                // it is under the edge: step out and look down at it
+                let h = trk.unwrap();
+                roof_tgt = Some(h);
+                roof_hidden = true;
+                let pk = self.roof_peek(h.pos);
+                self.roof_move(&mut a, pk, 3.0);
+            } else {
+                // nobody to shoot: rest in the middle, and look over an edge every so often
+                if hpf > 0.8 && t - self.patrol_t > 10.0 {
+                    self.patrol_k += 1;
+                    self.patrol_t = t;
+                }
+                if hpf > 0.8 && t - self.patrol_t < 4.5 {
+                    let ang = self.patrol_k as f32 * 2.4;
+                    let pk = self.roof_peek([me_p[0] + 300.0 * ang.cos(), me_p[1] + 300.0 * ang.sin(), 0.0]);
+                    self.roof_move(&mut a, pk, 3.0);
+                } else {
+                    self.roof_move(&mut a, rf.center, 3.0);
+                }
+            }
+        } else if self.roof_st == RoofSt::Approach && (fight || evade || !weapon_near) {
+            // on the way to our roof (shooting back as we go); a needed weapon lying about is taken first
+            label = "toroof";
+            self.loot = None;
+            let foot = self.roof_foot;
+            let rf_top = self.map.roofs[self.roof].top;
+            if d2(&foot, &me_p) < 1.8 {
+                if me.grounded && me.energy >= (rf_top - me.pos[2]) * 1.6 + 15.0 {
+                    self.roof_st = RoofSt::Climb;
+                    self.roof_t0 = t;
+                }
+                a.mv = [0.0, 0.0];
+            } else {
+                self.go_to(&mut a, foot, 1.2, !(fight || evade));
+                a.boost = (fight || evade) && me.energy > 60.0 && d2(&foot, &me_p) > 25.0;
+            }
         } else if fight {
             label = "fight";
             self.loot = None;
@@ -1298,7 +1729,11 @@ impl Brain {
         // ---- aim and fire
         let mut tgt: Option<Tgt> = None;
         let mut allow_laser = false;
-        if let Some(p) = &primary {
+        if let Some(h) = &roof_tgt {
+            let k = 1.0 + 0.05 * h.cubes as f32;
+            tgt = Some(Tgt { pos: h.pos, vel: h.vel, r: 2.5 * k, h: 9.0 * k });
+            allow_laser = true;
+        } else if let Some(p) = &primary {
             if fight || p.hostile || p.facing {
                 let k = 1.0 + 0.05 * p.cubes as f32;
                 tgt = Some(Tgt { pos: p.pos, vel: p.vel, r: 2.5 * k, h: 9.0 * k });
@@ -1339,7 +1774,7 @@ impl Brain {
             }
         }
         if let Some(tg) = tgt {
-            self.aim_fire(&mut a, &tg, allow_laser);
+            self.aim_fire(&mut a, &tg, allow_laser, roof_hidden);
         } else {
             // never leave a laser charging with nothing to shoot
             let mut look: Option<f32> = None;
@@ -1397,7 +1832,7 @@ impl Brain {
         }
 
         if std::env::var_os("MECH_DEBUG").is_some() {
-            self.dbg = format!("d_safe={:.0} t_out={:.1} need={:.1} urgent={} mv=({:.2},{:.2}) boost={}", d_safe, t_out - t, need, urgent, a.mv[0], a.mv[1], a.boost);
+            self.dbg = format!("d_safe={:.0} t_out={:.1} urgent={} mv=({:.2},{:.2}) boost={} jump={} roof={:?}#{} foot=({:.0},{:.0}) fails={}", d_safe, t_out - t, urgent, a.mv[0], a.mv[1], a.boost, a.jump, self.roof_st, self.roof, self.roof_foot[0], self.roof_foot[1], self.roof_fails);
         }
         self.label = label;
         self.prof[4] = self.prof[4].max(t_start.elapsed().as_secs_f32() * 1000.0);

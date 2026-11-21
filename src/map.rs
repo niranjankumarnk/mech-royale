@@ -11,6 +11,20 @@ use std::collections::BinaryHeap;
 /// Mech radius plus a safety margin: nav cells closer than this to a solid are blocked.
 pub const R_INFLATE: f32 = 3.0;
 
+/// A flat roof big enough to stand on well away from its edges.
+#[derive(Clone, Debug)]
+pub struct Roof {
+    /// Height of the roof surface.
+    pub top: f32,
+    /// Highest ground under the building (the climb is `top - ground`).
+    pub ground: f32,
+    /// Area in square metres.
+    pub area: usize,
+    /// The point farthest from every edge, and that distance.
+    pub center: [f32; 2],
+    pub depth: f32,
+}
+
 pub struct Map {
     pub nx: usize,
     pub ny: usize,
@@ -43,6 +57,11 @@ pub struct Map {
     pub bx1: f32,
     pub by0: f32,
     pub by1: f32,
+    /// Usable roofs, and per vertex the roof it belongs to (0 = none, else index + 1) and how far
+    /// (in metres, city-block) it is from that roof's edge.
+    pub roofs: Vec<Roof>,
+    pub roof_id: Vec<u16>,
+    pub roof_depth: Vec<u8>,
 }
 
 fn pip(ring: &[(f32, f32)], x: f32, y: f32) -> bool {
@@ -289,8 +308,9 @@ impl Map {
             }
             frontier = next;
         }
-        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, clear, need_h: 9.4, surf, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3] };
+        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, clear, need_h: 9.4, surf, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3], roofs: Vec::new(), roof_id: vec![0; n], roof_depth: vec![0; n] };
         m.label_components();
+        m.find_roofs();
         m
     }
 
@@ -339,6 +359,99 @@ impl Map {
         }
         self.comp = comp;
         self.main_comp = best.1;
+    }
+
+    /// Group solid vertices into flat roofs and keep the ones worth standing on.
+    fn find_roofs(&mut self) {
+        let (nx, ny) = (self.nx, self.ny);
+        let n = nx * ny;
+        let mut region = vec![0u32; n];
+        let mut next = 0u32;
+        let mut stack: Vec<usize> = Vec::new();
+        let mut members: Vec<usize> = Vec::new();
+        let mut depth = vec![0u8; n];
+        for s0 in 0..n {
+            if !self.solid[s0] || region[s0] != 0 || self.ebase[s0].is_finite() {
+                continue;
+            }
+            next += 1;
+            members.clear();
+            region[s0] = next;
+            stack.push(s0);
+            while let Some(k) = stack.pop() {
+                members.push(k);
+                let (i, j) = (k % nx, k / nx);
+                for (di, dj) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                    let (ni, nj) = (i as isize + di, j as isize + dj);
+                    if ni < 0 || nj < 0 || ni >= nx as isize || nj >= ny as isize {
+                        continue;
+                    }
+                    let q = nj as usize * nx + ni as usize;
+                    if self.solid[q] && region[q] == 0 && (self.gtop[q] - self.gtop[k]).abs() < 0.6 {
+                        region[q] = next;
+                        stack.push(q);
+                    }
+                }
+            }
+            if members.len() < 300 {
+                continue;
+            }
+            // distance to the region's edge, by breadth-first layers
+            let mut frontier: Vec<usize> = Vec::new();
+            for &k in &members {
+                let (i, j) = (k % nx, k / nx);
+                let edge = i == 0 || j == 0 || i + 1 >= nx || j + 1 >= ny || region[k - 1] != next || region[k + 1] != next || region[k - nx] != next || region[k + nx] != next;
+                if edge {
+                    depth[k] = 1;
+                    frontier.push(k);
+                }
+            }
+            let mut d = 1u8;
+            let mut deepest = frontier.first().cloned().unwrap_or(members[0]);
+            while !frontier.is_empty() && d < 250 {
+                d += 1;
+                let mut nf = Vec::new();
+                for &k in &frontier {
+                    let (i, j) = (k % nx, k / nx);
+                    if i == 0 || j == 0 || i + 1 >= nx || j + 1 >= ny {
+                        continue;
+                    }
+                    for q in [k - 1, k + 1, k - nx, k + nx] {
+                        if region[q] == next && depth[q] == 0 {
+                            depth[q] = d;
+                            nf.push(q);
+                        }
+                    }
+                }
+                if let Some(&k) = nf.first() {
+                    deepest = k;
+                }
+                frontier = nf;
+            }
+            let top = self.gtop[members[0]];
+            let ground = members.iter().map(|&k| self.terr[k]).fold(f32::NEG_INFINITY, f32::max);
+            let dmax = depth[deepest] as f32;
+            let h = top - ground;
+            if dmax >= 9.0 && h >= 11.0 && h <= 45.0 {
+                let id = self.roofs.len() as u16 + 1;
+                for &k in &members {
+                    self.roof_id[k] = id;
+                    self.roof_depth[k] = depth[k];
+                }
+                self.roofs.push(Roof { top, ground, area: members.len(), center: [self.minx + (deepest % nx) as f32, self.miny + (deepest / nx) as f32], depth: dmax });
+            }
+        }
+    }
+
+    /// Roof under a point (index into `roofs`) and the distance from its edge there.
+    pub fn roof_at(&self, x: f32, y: f32) -> Option<(usize, f32)> {
+        let k = self.vert(x, y)?;
+        let id = self.roof_id[k];
+        if id == 0 {
+            None
+        } else {
+            Some((id as usize - 1, self.roof_depth[k] as f32))
+        }
     }
 
     /// Free of walls and with enough headroom for the mech as it is now.
@@ -395,6 +508,20 @@ impl Map {
         match self.vert(x, y) {
             Some(k) => z < self.gtop[k] - 0.3 || (z > self.ebase[k] && z < self.etop[k]),
             None => true,
+        }
+    }
+
+    /// Height of whatever a mech would stand on here: a roof, a deck or the ground.
+    pub fn support(&self, x: f32, y: f32) -> f32 {
+        match self.vert(x, y) {
+            Some(k) => {
+                if self.solid[k] {
+                    self.gtop[k]
+                } else {
+                    self.walkh[k]
+                }
+            }
+            None => 0.0,
         }
     }
 
@@ -546,7 +673,13 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(n: usize) -> Planner {
-        Planner { g: vec![0; n], from: vec![0; n], stamp: vec![0; n], epoch: 0, heap: BinaryHeap::new() }
+        // Filled with a non-zero value first so that every page is really mapped now, during
+        // start-up, and not by page faults in the middle of the first searches of a match.
+        let mut p = Planner { g: vec![1; n], from: vec![1; n], stamp: vec![1; n], epoch: 0, heap: BinaryHeap::with_capacity(1 << 15) };
+        p.g.iter_mut().for_each(|x| *x = 0);
+        p.from.iter_mut().for_each(|x| *x = 0);
+        p.stamp.iter_mut().for_each(|x| *x = 0);
+        p
     }
 
     /// A* over the nav grid. Returns the cell path from `start` and whether it reaches `goal`;
