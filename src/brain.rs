@@ -245,28 +245,31 @@ pub struct Policy {
     pub lightning: bool,
     /// Step out of the path of gun bullets that are already in the air.
     pub dodge: bool,
+    /// With an empty weapon slot, fetch a laser or lightning before any other loot.
+    pub arm_first: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
             _ => Policy::submitted(),
         }
     }
@@ -458,6 +461,7 @@ pub struct Brain {
     /// Debug text for the simulator trace.
     pub dbg: String,
     pub gate: [u32; 6],
+    pub known_pickups: usize,
     /// Worst time seen per section, in ms: ingest, spot choice, loot choice, path planning, whole decision.
     pub prof: [f32; 5],
 }
@@ -571,6 +575,7 @@ impl Brain {
             prof: [0.0; 5],
             dbg: String::new(),
             gate: [0; 6],
+            known_pickups: 0,
         }
     }
 
@@ -1044,7 +1049,9 @@ impl Brain {
                 if k == WK::Mortar || have(k) || (upgrade_to_laser && k != WK::Laser) {
                     continue;
                 }
-                if enemy_near(&it.pos, 60.0) || npc_near(&it.pos, 48.0) {
+                // arm first: a drone next to the weapon is worth its few hits
+                let armf = self.pol.arm_first && free_slot;
+                if enemy_near(&it.pos, if armf { 35.0 } else { 60.0 }) || (!armf && npc_near(&it.pos, 48.0)) {
                     continue;
                 }
                 let value = if self.pol.lightning {
@@ -1094,10 +1101,13 @@ impl Brain {
         let mut cur: Option<f32> = None;
         for (l, value) in cands {
             let d = d2(&l.pos, &me.pos);
-            if d > 260.0 || !reach(&l.pos) || !zone_ok(&l.pos, d) || (l.kind != LK::Npc && watched(&l.pos)) {
+            let arm = self.pol.arm_first && free_slot && l.kind == LK::Pickup;
+            if d > if arm { 380.0 } else { 260.0 } || !reach(&l.pos) || !zone_ok(&l.pos, d) || (l.kind != LK::Npc && watched(&l.pos)) {
                 continue;
             }
-            let s = value / (d * 1.3 + 25.0);
+            // arm first: with an empty slot a weapon on the ground outranks every crate, cube and
+            // drone, however much nearer they are (a second weapon about doubles our damage)
+            let s = if arm { 1000.0 - d } else { value / (d * 1.3 + 25.0) };
             if let Some(c) = &self.loot {
                 if c.kind == l.kind && c.id == l.id {
                     cur = Some(s);
@@ -2147,7 +2157,24 @@ impl Brain {
             } else {
                 85.0
             };
-            self.fight_move(&mut a, p.pos, want);
+            // unarmed and a weapon is near: fight on the way to it rather than on the spot
+            let mut fetch: Option<[f32; 2]> = None;
+            if self.pol.arm_first && me.w.iter().any(|w| w.is_none()) && hpf > 0.35 {
+                let mut bd = 150.0f32;
+                for it in self.pickups.values() {
+                    let d = d2(&it.pos, &me.pos);
+                    let ground = (it.pos[2] - self.map.ground(it.pos[0], it.pos[1])).abs() < 3.0;
+                    let inside = d2(&it.pos, &z.c) < z.r - 6.0;
+                    if matches!(it.kind, Some(k) if k != WK::Mortar && !have(k)) && d < bd && ground && inside && self.map.passable(self.map.cell_of(it.pos[0], it.pos[1])) {
+                        bd = d;
+                        fetch = Some([it.pos[0], it.pos[1]]);
+                    }
+                }
+            }
+            match fetch {
+                Some(g) => self.go_to(&mut a, g, 1.0, false),
+                None => self.fight_move(&mut a, p.pos, want),
+            }
         } else if evade {
             label = "evade";
             self.loot = None;
@@ -2424,6 +2451,7 @@ impl Brain {
         if std::env::var_os("MECH_DEBUG").is_some() {
             self.dbg = format!("d_safe={:.0} t_out={:.1} urgent={} mv=({:.2},{:.2}) boost={} jump={} roof={:?}#{} foot=({:.0},{:.0}) fails={}", d_safe, t_out - t, urgent, a.mv[0], a.mv[1], a.boost, a.jump, self.roof_st, self.roof, self.roof_foot[0], self.roof_foot[1], self.roof_fails);
         }
+        self.known_pickups = self.pickups.values().filter(|it| matches!(it.kind, Some(WK::Laser) | Some(WK::Lightning))).count();
         self.label = label;
         self.prof[4] = self.prof[4].max(t_start.elapsed().as_secs_f32() * 1000.0);
         a.aim[0] = wrap(a.aim[0]);

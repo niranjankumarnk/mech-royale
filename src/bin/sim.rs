@@ -1313,7 +1313,7 @@ fn main() {
             println!("match {} seed {} bot {}: place {:2} pts {:2} kills {} death_t {:6.1} by {:14} dealt {:6.0} taken {:6.0} zone_dmg {:5.0} stuck_ticks {} max_stuck {} w1 {:?} cubes {} labels {:?}", mi, seed, i, place[i], pts, m.kills, m.death_t, m.killed_by, m.dmg_dealt, m.dmg_taken, m.dmg_zone, m.stuck, m.max_stuck, m.slot1, m.cubes, if i == 0 { format!("{:?}", labels) } else { String::new() });
         }
         for k in 0..6 { gate[k] += brains[0].gate[k]; }
-        println!("   prof ms (ingest, spot, loot, astar, total): {:?}  ffa flags: {:?}", brains[0].prof, brains.iter().map(|b| if b.ffa { b.ffa_why } else { "-" }).collect::<Vec<_>>());
+        println!("   prof ms: {:?} known wanted pickups {} ffa flags: {:?}", brains[0].prof, brains[0].known_pickups, brains.iter().map(|b| if b.ffa { b.ffa_why } else { "-" }).collect::<Vec<_>>());
         if verbose {
             for l in &trace {
                 println!("   {}", l);
