@@ -212,10 +212,50 @@ struct Act {
     drop: Option<i64>,
 }
 
-/// Experiment R: against the practice squad, fight from a roof. Climb the nearest big flat roof,
-/// stand where the ground near the building cannot see us, step to the edge to shoot, step back
-/// to reload, and come down when the zone says so.
-const ROOF: bool = true;
+/// Behaviour switches. One code base carries every experiment; the simulator can run different
+/// policies against each other in the same match.
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
+    /// Against the practice squad, fight from a roof: climb the nearest big flat roof, stand where
+    /// the ground near the building cannot see us, step to the edge to shoot, step back to reload,
+    /// and come down when the zone says so.
+    pub roof: bool,
+    /// Recognise a free-for-all within seconds (gunfire all around, other mechs losing health to
+    /// each other, two different attackers, an early death) instead of after two deaths.
+    pub ffa_fast: bool,
+    /// In the first seconds of a match do not trade shots at range: break line of sight instead.
+    pub opening_caution: bool,
+    /// When breaking contact, run to the nearest spot the shooters cannot see (not to the
+    /// best-scoring spot, which could be a long run across open ground).
+    pub near_cover: bool,
+    /// In a free-for-all, get out of sight of any mech that can see us, whether or not it has
+    /// started shooting.
+    pub unseen: bool,
+    /// In a free-for-all, hide in the middle of a nearby roof (no peeking, no patrol; shoot back
+    /// only at a mech that is shooting us).
+    pub roof_ffa: bool,
+}
+
+impl Policy {
+    /// What the submitted binary runs.
+    pub fn submitted() -> Policy {
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false }
+    }
+
+    /// Named presets for the simulator.
+    pub fn named(name: &str) -> Policy {
+        match name {
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false },
+            _ => Policy::submitted(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum RoofSt {
@@ -273,6 +313,7 @@ fn dps_of(gun: bool, laser: bool, lightning: bool, mortar: bool, d: f32, cubes: 
 }
 
 pub struct Brain {
+    pub pol: Policy,
     pub map: Map,
     pl: Planner,
     rng: u64,
@@ -307,6 +348,10 @@ pub struct Brain {
     spot_tick: i64,
     spot_evade: bool,
     spot_nc: [f32; 2],
+    cover: Option<[f32; 2]>,
+    cover_tick: i64,
+    cover_seen: Vec<u32>,
+    cover_epoch: u32,
     loot: Option<Loot>,
     stuck: i32,
     unstick: i32,
@@ -340,6 +385,19 @@ pub struct Brain {
     kills: i32,
     start_alive: i32,
     mismatch_t: f32,
+    /// Weapon sounds heard that were not a mech shooting at us.
+    snd_other: u32,
+    /// Mechs that damaged us before our first kill.
+    early_attackers: Vec<i64>,
+    /// Last health seen per mech, and when we last hit each.
+    hp_seen: HashMap<i64, (f32, f32)>,
+    my_hit_t: HashMap<i64, f32>,
+    hp_drops: u32,
+    snd_ffa: bool,
+    /// A mech that keeps shooting us: its id, since when, and its latest hit.
+    pursuer: (i64, f32, f32),
+    /// Why we decided this is a free-for-all (for the simulator trace).
+    pub ffa_why: &'static str,
     regen_mode: bool,
     pub label: &'static str,
     /// Debug text for the simulator trace.
@@ -366,6 +424,7 @@ impl Brain {
         let n = map.gx * map.gy;
         let seed = hello["seed"].as_u64().unwrap_or(1) ^ 0x9E37_79B9_7F4A_7C15;
         Brain {
+            pol: Policy::submitted(),
             map,
             pl: Planner::new(n),
             rng: seed | 1,
@@ -400,6 +459,10 @@ impl Brain {
             spot_tick: -100,
             spot_evade: false,
             spot_nc: [f32::NAN, f32::NAN],
+            cover: None,
+            cover_tick: -100,
+            cover_seen: vec![0; n],
+            cover_epoch: 0,
             loot: None,
             stuck: 0,
             unstick: 0,
@@ -428,6 +491,14 @@ impl Brain {
             kills: 0,
             start_alive: -1,
             mismatch_t: -1.0,
+            snd_other: 0,
+            early_attackers: Vec::new(),
+            hp_seen: HashMap::new(),
+            my_hit_t: HashMap::new(),
+            hp_drops: 0,
+            snd_ffa: false,
+            pursuer: (-1, 0.0, -100.0),
+            ffa_why: "",
             regen_mode: false,
             label: "",
             prof: [0.0; 5],
@@ -582,6 +653,14 @@ impl Brain {
                         }
                         match e["by"].as_i64() {
                             Some(id) if id < 100 => {
+                                if self.kills == 0 && !self.early_attackers.contains(&id) {
+                                    self.early_attackers.push(id);
+                                }
+                                if self.pursuer.0 == id && t - self.pursuer.2 < 6.0 {
+                                    self.pursuer.2 = t;
+                                } else {
+                                    self.pursuer = (id, t, t);
+                                }
                                 self.last_mech_hit_t = t;
                                 self.last_hit_by = id;
                                 if let Some(tr) = self.mechs.get_mut(&id) {
@@ -593,6 +672,11 @@ impl Brain {
                                 self.npc_hit_by = id;
                             }
                             None => {}
+                        }
+                    }
+                    Some("hit") => {
+                        if let Some(id) = e["target"].as_i64() {
+                            self.my_hit_t.insert(id, t);
                         }
                     }
                     Some("kill") => {
@@ -614,17 +698,77 @@ impl Brain {
                 }
             }
         }
-        // a death we did not cause means a free-for-all (kill events can lag the count by a tick)
+        // other mechs losing health in gun- or laser-sized steps that we did not cause: mechs are
+        // shooting each other, which the practice squad never does (drone hits are 25 each)
+        if let Some(arr) = o["mechs"].as_array() {
+            for m in arr {
+                let id = m["id"].as_i64().unwrap_or(-1);
+                if id < 0 || id >= 100 || !m["hp"].is_number() {
+                    continue;
+                }
+                let hp = fnum(&m["hp"]);
+                if let Some(&(prev, pt)) = self.hp_seen.get(&id) {
+                    let drop = prev - hp;
+                    let mine = self.my_hit_t.get(&id).map_or(false, |ht| t - ht < 0.6);
+                    if t - pt < 0.25 && drop >= 44.0 && !mine {
+                        let near25 = (drop - 25.0 * (drop / 25.0).round()).abs() < 2.5;
+                        let two_drones_on_armor = (drop - 46.0).abs() < 1.6 || (drop - 42.0).abs() < 1.6;
+                        if !near25 && !two_drones_on_armor {
+                            self.hp_drops += if drop >= 100.0 { 2 } else { 1 };
+                        }
+                    }
+                }
+                self.hp_seen.insert(id, (hp, t));
+            }
+        }
+        // weapon fire that is not a mech shooting at us
+        if let Some(arr) = o["sounds"].as_array() {
+            for sd in arr {
+                let kind = sd["kind"].as_str().unwrap_or("");
+                if !matches!(kind, "gun" | "laser" | "lightning" | "mortar" | "explosion") {
+                    continue;
+                }
+                let b = fnum(&sd["bearing"]);
+                let from_hunter = self.mechs.values().any(|tr| {
+                    t - tr.seen_t < 1.5 && {
+                        let to = (tr.pos[1] - me_pos[1]).atan2(tr.pos[0] - me_pos[0]);
+                        let back = (me_pos[1] - tr.pos[1]).atan2(me_pos[0] - tr.pos[0]);
+                        wrap(to - b).abs() < 0.45 && (t - tr.hit_me_t < 4.0 || wrap(tr.aim[0] - back).abs() < 0.4)
+                    }
+                });
+                if !from_hunter {
+                    self.snd_other += 1;
+                }
+            }
+        }
         if !self.ffa {
-            // two unexplained deaths, so that one stray drone kill does not flip the mode
-            if self.alive + 1 < self.start_alive - self.kills {
+            let unexplained = self.start_alive - self.kills - self.alive;
+            // one early death we did not cause is enough when looking for a free-for-all quickly;
+            // otherwise two, so that one stray drone kill does not flip the mode
+            // (in 13 recorded team free-for-alls the first death came between 7 and 16 s)
+            let need = if self.pol.ffa_fast && t < 30.0 { 1 } else { 2 };
+            if unexplained >= need {
                 if self.mismatch_t < 0.0 {
                     self.mismatch_t = t;
                 } else if t - self.mismatch_t > 1.0 {
                     self.ffa = true;
+                    self.ffa_why = "deaths";
                 }
             } else {
                 self.mismatch_t = -1.0;
+            }
+            if self.pol.ffa_fast && !self.ffa {
+                // Softer signs: none is trusted alone (nothing public shows what the practice squad
+                // sounds like), any two together are.
+                let fighting = self.hp_drops >= 2;
+                let two = self.early_attackers.len() >= 2 && self.kills == 0;
+                if (t <= 8.0 && self.snd_other >= 40) || (t <= 15.0 && self.snd_other >= 75) {
+                    self.snd_ffa = true;
+                }
+                if (fighting as u8) + (two as u8) + (self.snd_ffa as u8) >= 2 {
+                    self.ffa = true;
+                    self.ffa_why = "two signs";
+                }
             }
         }
     }
@@ -776,9 +920,16 @@ impl Brain {
     }
 
     // ------------------------------------------------------------------ what to collect
-    fn choose_loot(&self, soon: bool) -> Option<Loot> {
+    fn choose_loot(&self, soon: bool, careful: bool) -> Option<Loot> {
         let me = &self.me;
         let t = self.t;
+        // careful: do not walk into the view of a mech we know about to fetch something
+        let watched = |p: &[f32; 3]| -> bool {
+            careful
+                && self.mechs.values().any(|tr| {
+                    t - tr.seen_t < 8.0 && d2(&tr.pos, p) < 230.0 && self.map.los_coarse([tr.pos[0], tr.pos[1], tr.pos[2] + 8.0], [p[0], p[1], p[2] + 4.5])
+                })
+        };
         let z = &self.zone;
         let zm = self.zm();
         let hp_frac = me.hp / me.max_hp;
@@ -856,7 +1007,7 @@ impl Brain {
         let mut cur: Option<f32> = None;
         for (l, value) in cands {
             let d = d2(&l.pos, &me.pos);
-            if d > 260.0 || !reach(&l.pos) || !zone_ok(&l.pos, d) {
+            if d > 260.0 || !reach(&l.pos) || !zone_ok(&l.pos, d) || (l.kind != LK::Npc && watched(&l.pos)) {
                 continue;
             }
             let s = value / (d * 1.3 + 25.0);
@@ -989,6 +1140,78 @@ impl Brain {
         }
     }
 
+    /// Is `q` out of sight of a shooter whose muzzle is at `from` (body and head both hidden)?
+    fn hidden_from(&self, q: [f32; 2], from: [f32; 3]) -> bool {
+        let g = self.map.ground(q[0], q[1]);
+        !self.map.los(from, [q[0], q[1], g + 4.5]) && !self.map.los(from, [q[0], q[1], g + 8.6])
+    }
+
+    /// The nearest spot, by walking distance, that the given shooters cannot see. A flood over
+    /// the nav grid out to 90 m of walking; only cells next to an obstacle are tested (cover is
+    /// always next to something), and the first hidden one found is the closest.
+    fn find_cover(&mut self, shooters: &[[f32; 3]]) -> Option<[f32; 2]> {
+        let me_p = [self.me.pos[0], self.me.pos[1]];
+        let start = self.map.nearest_free(self.map.cell_of(me_p[0], me_p[1]), 5, false)?;
+        // the four nearest shooters decide
+        let mut sh: Vec<[f32; 3]> = shooters.to_vec();
+        sh.sort_by(|a, b| d2(a, &me_p).partial_cmp(&d2(b, &me_p)).unwrap_or(std::cmp::Ordering::Equal));
+        sh.truncate(4);
+        let m = &self.map;
+        let z = &self.zone;
+        let gx = m.gx as isize;
+        let gy = m.gy as isize;
+        if self.cover_epoch == u32::MAX {
+            self.cover_seen.iter_mut().for_each(|x| *x = 0);
+            self.cover_epoch = 0;
+        }
+        self.cover_epoch += 1;
+        let ep = self.cover_epoch;
+        let mut queue: std::collections::VecDeque<(u32, u16)> = std::collections::VecDeque::with_capacity(4096);
+        self.cover_seen[start] = ep;
+        queue.push_back((start as u32, 0));
+        let mut best: Option<(f32, [f32; 2])> = None;
+        let mut best_depth = u16::MAX;
+        while let Some((c32, depth)) = queue.pop_front() {
+            let c = c32 as usize;
+            // a few more rings after the first find, to pick the better of near-equal spots
+            if depth > 45 || depth > best_depth.saturating_add(4) {
+                break;
+            }
+            let (ci, cj) = ((c % m.gx) as isize, (c / m.gx) as isize);
+            if m.wall_near[c] <= 2 && (ci + cj) % 2 == 0 && depth >= 2 {
+                let q = m.center(c);
+                let g = m.surf[c];
+                let inside = d2(&q, &z.c) < z.r - 8.0;
+                if inside && sh.iter().all(|s0| !m.los_coarse(*s0, [q[0], q[1], g + 4.5]) && !m.los_coarse(*s0, [q[0], q[1], g + 8.6])) {
+                    // closer is better; a spot walled in on more sides and away from drones breaks ties
+                    let mut cost = depth as f32 * 2.0 - m.cover(q[0], q[1]) as f32 * 1.2;
+                    for np in self.npcs.values() {
+                        if d2(&q, &np.pos) < 50.0 {
+                            cost += 14.0;
+                        }
+                    }
+                    if best.map_or(true, |b| cost < b.0) {
+                        best = Some((cost, q));
+                    }
+                    best_depth = best_depth.min(depth);
+                }
+            }
+            for (dx, dy) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                let (ni, nj) = (ci + dx, cj + dy);
+                if ni < 0 || nj < 0 || ni >= gx || nj >= gy {
+                    continue;
+                }
+                let n = nj as usize * m.gx + ni as usize;
+                if self.cover_seen[n] == ep || !m.passable(n) || m.surf[n] - m.surf[c] > 1.9 {
+                    continue;
+                }
+                self.cover_seen[n] = ep;
+                queue.push_back((n as u32, depth + 1));
+            }
+        }
+        best.map(|b| b.1)
+    }
+
     // ------------------------------------------------------------------ roofs
     /// A place to climb roof `r` from: a free ground spot a few metres outside one of its edges
     /// with nothing but that roof's own wall in between, and the landing spot just inside the edge.
@@ -1069,7 +1292,8 @@ impl Brain {
                 continue;
             }
             let d = d2(&c, &me_p);
-            if d > 260.0 {
+            // in a free-for-all only a roof close by is worth the run in the open
+            if d > if self.ffa { 110.0 } else { 260.0 } {
                 continue;
             }
             let depth_next = z.nr - d2(&c, &z.nc);
@@ -1435,6 +1659,16 @@ impl Brain {
                 if hpf < 0.3 && ttk_them > 2.0 && !endgame {
                     fight = false;
                 }
+                // one mech that has kept after us for 10 s will not be shaken off: turn and fight
+                // it while we still have the health to (this also keeps a wrongly raised
+                // free-for-all flag from turning a practice hunter into an endless chase)
+                if self.pursuer.0 == p.id && t - self.pursuer.1 > 10.0 && t - self.pursuer.2 < 4.0 && combat.len() == 1 && hpf > 0.35 {
+                    fight = true;
+                }
+            } else if self.pol.opening_caution && t < 20.0 && p.d > 70.0 && p.hp > 300.0 {
+                // first seconds, mode still unknown: a shot from afar is a free-for-all opener far
+                // more often than a practice hunter. Do not trade in the open; get out of sight.
+                fight = false;
             } else {
                 // practice ladder: every hunter has to be killed; back off only to regenerate
                 let losing = ttk_me < ttk_them * 0.8;
@@ -1450,7 +1684,8 @@ impl Brain {
                 evade = false;
             } else {
                 evade = true;
-                self.evade_until = self.evade_until.max(t + 2.0);
+                // once out of sight, stay there a while instead of stepping straight back out
+                self.evade_until = self.evade_until.max(t + if self.ffa || (self.pol.opening_caution && t < 20.0) { 5.0 } else { 2.0 });
             }
         } else if !evade && !self.regen_mode {
             // a lone mech in view that is not looking at us: open on its back when the odds are good
@@ -1469,9 +1704,22 @@ impl Brain {
         if self.regen_mode && !fight {
             evade = true;
         }
+        // free-for-all (or the first seconds, when we cannot tell yet): whoever can see us will
+        // shoot within a second or two; be gone first
+        let careful = self.ffa || (self.pol.opening_caution && t < 20.0);
+        let mut watchers: Vec<[f32; 3]> = Vec::new();
+        if careful && self.pol.unseen && !fight {
+            for h in ths.iter().filter(|h| h.los && h.d < 220.0) {
+                watchers.push([h.pos[0], h.pos[1], h.pos[2] + 7.0]);
+            }
+            if !watchers.is_empty() {
+                evade = true;
+            }
+        }
 
         // ---- roof bookkeeping (practice squad only)
-        let roof_ok = ROOF && !self.ffa;
+        let roof_ok = (self.pol.roof && !self.ffa) || (self.pol.roof_ffa && self.ffa);
+        let roof_passive = self.ffa;
         let on_roof_now: Option<(usize, f32)> = match self.map.roof_at(me.pos[0], me.pos[1]) {
             Some((r, dep)) if (me.pos[2] - self.map.roofs[r].top).abs() < 1.5 => Some((r, dep)),
             _ => None,
@@ -1611,7 +1859,8 @@ impl Brain {
             let on_it = |h: &Th| self.map.roof_at(h.pos[0], h.pos[1]).map(|x| x.0) == Some(roof) && (h.pos[2] - rf.top).abs() < 3.0;
             let up: Vec<Th> = ths.iter().filter(|h| on_it(h)).cloned().collect();
             let key = |h: &Th| h.hp + 3.0 * h.d;
-            let vis = ths.iter().filter(|h| h.los && h.d < 235.0).cloned().min_by(|x, y| key(x).partial_cmp(&key(y)).unwrap_or(std::cmp::Ordering::Equal));
+            // free-for-all: only a mech that is shooting us is a target; nobody is looked for
+            let vis = ths.iter().filter(|h| h.los && h.d < 235.0 && (!roof_passive || h.hostile)).cloned().min_by(|x, y| key(x).partial_cmp(&key(y)).unwrap_or(std::cmp::Ordering::Equal));
             let trk = ths.iter().filter(|h| !h.los && h.d < 170.0).cloned().min_by(|x, y| x.d.partial_cmp(&y.d).unwrap_or(std::cmp::Ordering::Equal));
             let mut ready = false;
             for w in me.w.iter().flatten() {
@@ -1639,7 +1888,7 @@ impl Brain {
                 } else {
                     self.roof_jink(&mut a, h.pos, if my_depth < 6.0 { 3.0 } else { 5.0 });
                 }
-            } else if trk.is_some() && ready && hpf > 0.5 {
+            } else if trk.is_some() && ready && hpf > 0.5 && !roof_passive {
                 // it is under the edge: step out and look down at it
                 let h = trk.unwrap();
                 roof_tgt = Some(h);
@@ -1648,6 +1897,9 @@ impl Brain {
                 self.roof_move(&mut a, pk, 3.0);
             } else {
                 // nobody to shoot: rest in the middle, and look over an edge every so often
+                if roof_passive {
+                    self.patrol_t = t - 5.0; // never walk to an edge to look
+                }
                 if hpf > 0.8 && t - self.patrol_t > 10.0 {
                     self.patrol_k += 1;
                     self.patrol_t = t;
@@ -1693,13 +1945,58 @@ impl Brain {
         } else if evade {
             label = "evade";
             self.loot = None;
-            let g = want_spot(self, true).unwrap_or(z.nc);
+            let exposed = combat.iter().any(|h| h.los) || t - self.last_mech_hit_t < 2.0 || !watchers.is_empty();
+            let mut g: Option<[f32; 2]> = None;
+            // (practice fights after the opening keep the scored retreat spot they were measured with)
+            if self.pol.near_cover && careful {
+                // who to hide from: the mechs engaging us, and whoever shot us from out of view
+                let mut shooters: Vec<[f32; 3]> = combat.iter().map(|h| [h.pos[0], h.pos[1], h.pos[2] + 7.0]).collect();
+                if shooters.is_empty() {
+                    for h in ths.iter().filter(|h| h.hostile) {
+                        shooters.push([h.pos[0], h.pos[1], h.pos[2] + 7.0]);
+                    }
+                }
+                if let Some(v) = self.virt {
+                    if t < self.virt_until && shooters.is_empty() {
+                        shooters.push(v);
+                    }
+                }
+                for w in &watchers {
+                    if !shooters.iter().any(|sh| d2(sh, w) < 3.0) {
+                        shooters.push(*w);
+                    }
+                }
+                // when staying unseen matters, hide from every mech we know of, not only the ones
+                // looking at us now: running from one into the view of another gains nothing
+                if careful && !shooters.is_empty() {
+                    for tr in self.mechs.values() {
+                        let o = [tr.pos[0], tr.pos[1], tr.pos[2] + 7.0];
+                        if t - tr.seen_t < 10.0 && d2(&o, &me.pos) < 250.0 && !shooters.iter().any(|sh| d2(sh, &o) < 3.0) {
+                            shooters.push(o);
+                        }
+                    }
+                }
+                if !shooters.is_empty() {
+                    // keep the spot we are running to while it still hides us; look again otherwise
+                    let keep = self.cover.filter(|c| self.dcount - self.cover_tick < 40 && shooters.iter().all(|sh| self.hidden_from(*c, *sh)));
+                    if keep.is_none() {
+                        self.cover = self.find_cover(&shooters);
+                        self.cover_tick = self.dcount;
+                    }
+                    g = self.cover;
+                }
+            }
+            let g = match g {
+                Some(g) => g,
+                // nobody has us in sight any more: stay behind the cover we ran to
+                None if self.pol.near_cover && careful && self.cover.map_or(false, |c| self.dcount - self.cover_tick < 80 && d2(&c, &me_p) < 4.0) => me_p,
+                None => want_spot(self, true).unwrap_or(z.nc),
+            };
             self.go_to(&mut a, g, 1.5, false);
-            let exposed = combat.iter().any(|h| h.los) || t - self.last_mech_hit_t < 2.0;
             a.boost = exposed && me.energy > 12.0;
         } else {
             let t0 = std::time::Instant::now();
-            loot = self.choose_loot(soon);
+            loot = self.choose_loot(soon, careful);
             self.prof[2] = self.prof[2].max(t0.elapsed().as_secs_f32() * 1000.0);
             self.loot = loot;
             if let Some(l) = loot {

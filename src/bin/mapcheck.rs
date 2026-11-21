@@ -59,6 +59,57 @@ fn main() {
         }
         return;
     }
+    if std::env::args().nth(3).as_deref() == Some("seen") {
+        // For every mech of a recorded match: how long was it in another mech's view?
+        // mapcheck <dir> <r> seen <match.json>
+        let path = std::env::args().nth(4).expect("match json");
+        let rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let frames = rec["frames"].as_array().unwrap();
+        let mut seen: std::collections::BTreeMap<i64, [f32; 3]> = std::collections::BTreeMap::new();
+        for fr in frames {
+            let t = fr["t"].as_f64().unwrap() as f32 / 20.0;
+            let rows: Vec<(i64, [f32; 3], f32)> = fr["m"].as_array().unwrap().iter().filter(|r| r[6].as_f64().unwrap_or(0.0) > 0.0).map(|r| (r[0].as_i64().unwrap(), [r[1].as_f64().unwrap() as f32, r[2].as_f64().unwrap() as f32, r[3].as_f64().unwrap() as f32], r[4].as_f64().unwrap() as f32)).collect();
+            for a in &rows {
+                let mut any = false;
+                for b in &rows {
+                    if a.0 == b.0 {
+                        continue;
+                    }
+                    let d = ((a.1[0] - b.1[0]).powi(2) + (a.1[1] - b.1[1]).powi(2)).sqrt();
+                    if d > 200.0 {
+                        continue;
+                    }
+                    let bearing = (a.1[1] - b.1[1]).atan2(a.1[0] - b.1[0]);
+                    let mut off = (bearing - b.2) % std::f32::consts::TAU;
+                    if off > std::f32::consts::PI {
+                        off -= std::f32::consts::TAU;
+                    }
+                    if off < -std::f32::consts::PI {
+                        off += std::f32::consts::TAU;
+                    }
+                    if d > 45.0 && off.abs() > std::f32::consts::PI / 3.0 {
+                        continue;
+                    }
+                    if m.los([b.1[0], b.1[1], b.1[2] + 8.0], [a.1[0], a.1[1], a.1[2] + 4.5]) {
+                        any = true;
+                        break;
+                    }
+                }
+                if any {
+                    let k = if t < 30.0 { 0 } else if t < 90.0 { 1 } else { 2 };
+                    seen.entry(a.0).or_insert([0.0; 3])[k] += 0.1;
+                }
+            }
+        }
+        for mm in rec["mechs"].as_array().unwrap() {
+            let id = mm["id"].as_i64().unwrap();
+            let s = seen.get(&id).cloned().unwrap_or([0.0; 3]);
+            let place = rec["places"][id.to_string()].as_i64().unwrap_or(0);
+            let death = rec["deaths"].as_array().unwrap().iter().find(|d| d[1].as_i64() == Some(id)).map(|d| d[0].as_f64().unwrap() / 20.0).unwrap_or(-1.0);
+            println!("REAL {} place {:2} died {:6.1} seen {:4.1} {:4.1} {:5.1} {}", rec["name"].as_str().unwrap_or(""), place, death, s[0], s[1], s[2], mm["name"].as_str().unwrap_or(""));
+        }
+        return;
+    }
     if std::env::args().nth(3).as_deref() == Some("label") {
         // per input line: comp id (0 = blocked cell), is_main, solid, my ground height
         let mut out = String::new();

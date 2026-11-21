@@ -132,8 +132,12 @@ struct World {
     zr: f32,
     centers: Vec<[f32; 2]>,
     events: Vec<Vec<Value>>,
+    /// weapon sounds heard by each mech since its last observation
+    sounds: Vec<Vec<Value>>,
     ffa: bool,
     mine: usize,
+    /// ghost-replay mode: the other mechs replay a recorded match and cannot be hurt
+    ghost: bool,
 }
 
 const TIER_SIGMA: [f32; 4] = [5.0, 3.0, 1.8, 0.7];
@@ -196,6 +200,14 @@ impl World {
         if !self.mechs[target].alive {
             return;
         }
+        // the practice squad never hurts its own
+        if !self.ffa && target >= self.mine && by >= self.mine as i64 && by < 100 {
+            return;
+        }
+        // ghosts follow their recording whatever we do to them
+        if self.ghost && target >= self.mine {
+            return;
+        }
         let m = &self.mechs[target];
         let bearing = (from[1] - m.pos[1]).atan2(from[0] - m.pos[0]);
         let rear = weapon != "zone" && wrap(bearing - m.aim[0]).abs() > PI / 2.0;
@@ -242,6 +254,22 @@ impl World {
                 self.mechs[by as usize].kills += 1;
                 self.events[by as usize].push(json!({"type": "kill", "target": target}));
             }
+        }
+    }
+
+    /// Everyone within `range` of a shot hears it: noisy bearing, coarse distance.
+    fn emit_sound(&mut self, kind: &'static str, at: [f32; 3], by: usize, range: f32) {
+        for j in 0..self.mine.min(self.mechs.len()) {
+            if j == by || !self.mechs[j].alive {
+                continue;
+            }
+            let d = d2(&self.mechs[j].pos, &at);
+            if d > range {
+                continue;
+            }
+            let b = (at[1] - self.mechs[j].pos[1]).atan2(at[0] - self.mechs[j].pos[0]) + self.rng.gauss() * 7f32.to_radians();
+            let dist = if d < 60.0 { "near" } else if d < 160.0 { "mid" } else { "far" };
+            self.sounds[j].push(json!({"kind": kind, "bearing": wrap(b), "dist": dist, "age": 0.05}));
         }
     }
 
@@ -314,7 +342,7 @@ impl World {
                 "weapons": [{"kind": "gun", "cooldown": m.gun_cd.max(0.0), "ammo": m.ammo, "reload": m.reload.max(0.0), "stats": {"damage": 45, "cooldown": 0.24, "speed": 252, "range": 230, "spread_deg": 0.6, "mag": 12, "reload": 2.4}}, w1],
                 "stats": {"radius": 2.5 * scale, "height": 9.0 * scale, "eye_height": 8.0 * scale, "muzzle_height": 7.0 * scale, "walk_speed": 11.7, "boost_speed": 19.5, "turn_rate": 4, "pitch_rate": 3, "min_pitch": -0.7, "max_pitch": 1.3}},
             "mechs": mechs, "projectiles": projs, "crates": vis(&self.crates, false, true), "cubes": vis(&self.cubes, false, false), "pickups": vis(&self.picks, true, false),
-            "sounds": [], "beams": [], "events": self.events[i].clone(), "drops": [],
+            "sounds": self.sounds[i].clone(), "beams": [], "events": self.events[i].clone(), "drops": [],
             "zone": {"center": c, "radius": r, "next_center": nc, "next_radius": nr, "shrink_start": s, "shrink_end": e, "dps": dps},
             "offer": Value::Null
         })
@@ -669,6 +697,7 @@ impl World {
                 let d = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin()];
                 self.next_id += 1;
                 self.projs.push(Proj { id: self.next_id, owner: i as i64, pos: muzzle, vel: [d[0] * 252.0, d[1] * 252.0, d[2] * 252.0], dmg: 45.0, ttl: 230.0 / 252.0, kind: "gun" });
+                self.emit_sound("gun", m.pos, i, 320.0);
                 let mm = &mut self.mechs[i];
                 mm.shots[0] += 1;
                 mm.gun_cd = 0.24;
@@ -686,6 +715,7 @@ impl World {
                         self.mechs[i].charge = 0.0;
                         self.mechs[i].w1_cd = 1.65;
                         self.mechs[i].shots[2] += 1;
+                        self.emit_sound("laser", m.pos, i, 380.0);
                         // hitscan: first mech / drone / crate along the ray
                         let mut best: Option<(f32, i64)> = None;
                         let test = |pos: [f32; 3], r: f32, h: f32, id: i64, best: &mut Option<(f32, i64)>| {
@@ -891,8 +921,193 @@ impl World {
     }
 }
 
+/// Ghost replay: our bot is dropped into a recorded free-for-all in place of one mech. The other
+/// 15 move, aim, shoot (as sound) and die exactly as recorded; they do not react to us. What it
+/// measures: how soon our bot recognises the free-for-all, and how long it stands where a real
+/// mech's eyes were pointing.   sim ghost <map_dir> <match.json> <policy> [mech id | all]
+fn ghost_main(args: &[String]) {
+    let dir = args[2].clone();
+    let rec: Value = serde_json::from_str(&std::fs::read_to_string(&args[3]).expect("match file")).expect("match json");
+    let pol = args.get(4).cloned().unwrap_or_else(|| "default".into());
+    let which = args.get(5).cloned().unwrap_or_else(|| "all".into());
+    let verbose = std::env::var_os("MECH_DEBUG").is_some();
+    let ids: Vec<i64> = rec["mechs"].as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect();
+    let frames = rec["frames"].as_array().unwrap();
+    let last_tick = frames.last().map(|f| f["t"].as_i64().unwrap()).unwrap_or(0);
+    let mut sum = [0.0f32; 6];
+    let mut runs = 0;
+    let mut all_by_label: std::collections::BTreeMap<&'static str, f32> = std::collections::BTreeMap::new();
+    for &rid in &ids {
+        if which != "all" && which.parse::<i64>().ok() != Some(rid) {
+            continue;
+        }
+        let map = Map::load(&dir).expect("map");
+        let n = map.gx * map.gy;
+        let mut w = World { map, pl: Planner::new(n), rng: Rng(0x9E3779B97F4A7C15 ^ (rid as u64 + 7)), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 100, zc: [41.3, -72.8], zr: 560.0, centers: Vec::new(), events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa: true, mine: 1, ghost: true };
+        for zph in rec["zone"].as_array().unwrap() {
+            w.centers.push([zph["center"][0].as_f64().unwrap() as f32, zph["center"][1].as_f64().unwrap() as f32]);
+        }
+        while w.centers.len() < 7 {
+            let c = *w.centers.last().unwrap();
+            w.centers.push(c);
+        }
+        // mech 0 is ours, at the replaced mech's spawn; the rest are ghosts in recording order
+        let others: Vec<i64> = ids.iter().cloned().filter(|i| *i != rid).collect();
+        let spawn_of = |id: i64| -> [f32; 3] {
+            let m = rec["mechs"].as_array().unwrap().iter().find(|m| m["id"].as_i64() == Some(id)).unwrap();
+            [m["spawn"][0].as_f64().unwrap() as f32, m["spawn"][1].as_f64().unwrap() as f32, m["spawn"][2].as_f64().unwrap() as f32]
+        };
+        let mk = |p: [f32; 3]| Mech { pos: p, vel: [0.0; 2], aim: [0.0, 0.0], hp: 1400.0, max_hp: 1400.0, energy: 100.0, alive: true, cubes: 0, gun_cd: 0.0, ammo: 12, reload: 0.0, slot1: None, w1_cd: 0.0, charge: 0.0, last_dmg_t: -10.0, last_spend_t: -10.0, mv: [0.0; 2], boost: false, jump: false, vz: 0.0, grounded: true, cmd_aim: [0.0, 0.0], fire: [false; 2], tier: 3, path: Vec::new(), path_t: 0.0, strafe: 1.0, strafe_t: 0.0, noise: [0.0; 2], noise_t: 0.0, hold: [p[0], p[1]], kills: 0, death_t: -1.0, killed_by: String::new(), dmg_zone: 0.0, dmg_taken: 0.0, dmg_dealt: 0.0, stuck: 0, max_stuck: 0, cur_stuck: 0, seen_t: vec![-100.0; 16], wall_t: 0.0, shots: [0; 4] };
+        w.mechs.push(mk(spawn_of(rid)));
+        for &o in &others {
+            w.mechs.push(mk(spawn_of(o)));
+        }
+        for (k, np) in rec["npcs"].as_array().unwrap().iter().enumerate() {
+            w.npcs.push(Npc { id: 100 + k as i64, pos: [np[0].as_f64().unwrap() as f32, np[1].as_f64().unwrap() as f32, np[2].as_f64().unwrap() as f32], hp: 350.0, cd: 0.0 });
+        }
+        for (k, c) in rec["crates"].as_array().unwrap().iter().enumerate() {
+            w.crates.push(Thing { id: 1000 + k as i64, pos: [c[0].as_f64().unwrap() as f32, c[1].as_f64().unwrap() as f32, c[2].as_f64().unwrap() as f32], hp: 300.0, kind: "crate" });
+        }
+        for (k, pk) in rec["pickups"].as_array().unwrap().iter().enumerate() {
+            let kind = match pk[0].as_str().unwrap_or("") {
+                "laser" => "laser",
+                "lightning" => "lightning",
+                _ => "mortar",
+            };
+            w.picks.push(Thing { id: 8000 + k as i64, pos: [pk[1].as_f64().unwrap() as f32, pk[2].as_f64().unwrap() as f32, pk[3].as_f64().unwrap() as f32], hp: 0.0, kind });
+        }
+        let hello = json!({"type": "hello", "slot": 0, "seed": 77 + rid, "map": {"dir": dir}, "config": {"loot": {"pickup_radius": 4}}});
+        let mut brain = Brain::new(&hello);
+        if pol != "default" {
+            brain.pol = mechbot::brain::Policy::named(&pol);
+        }
+        let fires = rec["fires"].as_array().unwrap();
+        let mut fi = 0usize;
+        let mut frame_i = 0usize;
+        // seconds seen in [0,30), [30,90), [90,..); seconds aimed at; first time seen
+        let mut seen = [0.0f32; 3];
+        let mut aimed = 0.0f32;
+        let mut ffa_t = -1.0f32;
+        let mut labels: std::collections::BTreeMap<&'static str, u32> = std::collections::BTreeMap::new();
+        let mut seers = String::new();
+        let mut seen_by_label: std::collections::BTreeMap<&'static str, f32> = std::collections::BTreeMap::new();
+        let real_place = rec["places"][rid.to_string()].as_i64().unwrap_or(0);
+        let real_death = rec["deaths"].as_array().unwrap().iter().find(|d| d[1].as_i64() == Some(rid)).map(|d| d[0].as_f64().unwrap() as f32 / 20.0).unwrap_or(-1.0);
+        while w.tick <= last_tick && w.mechs[0].alive {
+            // ghosts from the recording
+            while frame_i + 1 < frames.len() && frames[frame_i + 1]["t"].as_i64().unwrap() <= w.tick {
+                frame_i += 1;
+            }
+            let fr = &frames[frame_i]["m"];
+            for (k, &o) in others.iter().enumerate() {
+                let g = &mut w.mechs[k + 1];
+                match fr.as_array().unwrap().iter().find(|r| r[0].as_i64() == Some(o)) {
+                    Some(r) if r[6].as_f64().unwrap_or(0.0) > 0.0 => {
+                        g.pos = [r[1].as_f64().unwrap() as f32, r[2].as_f64().unwrap() as f32, r[3].as_f64().unwrap() as f32];
+                        g.aim = [r[4].as_f64().unwrap() as f32, r[5].as_f64().unwrap() as f32];
+                        g.cmd_aim = g.aim;
+                        g.hp = r[6].as_f64().unwrap() as f32;
+                        g.cubes = r[7].as_i64().unwrap_or(0) as i32;
+                        g.slot1 = match r[9].as_i64().unwrap_or(-1) { 1 => Some("mortar"), 2 => Some("laser"), 3 => Some("lightning"), _ => None };
+                        g.alive = true;
+                        g.vel = [0.0, 0.0];
+                    }
+                    _ => g.alive = false,
+                }
+            }
+            // their shots, as sound
+            while fi < fires.len() && fires[fi][0].as_i64().unwrap() <= w.tick {
+                let sid = fires[fi][1].as_i64().unwrap();
+                if let Some(k) = others.iter().position(|o| *o == sid) {
+                    let (kind, range) = match fires[fi][2].as_str().unwrap_or("gun") { "laser" => ("laser", 380.0), "lightning" => ("lightning", 160.0), "mortar" => ("mortar", 420.0), _ => ("gun", 320.0) };
+                    let at = w.mechs[k + 1].pos;
+                    w.emit_sound(kind, at, k + 1, range);
+                }
+                fi += 1;
+            }
+            if w.tick % 2 == 0 {
+                for j in 1..16 {
+                    if w.mechs[j].alive && w.sees(0, w.mechs[j].pos, 4.5) {
+                        w.mechs[0].seen_t[j] = w.t;
+                    }
+                }
+                let obs = w.observe(0);
+                w.events[0].clear();
+                w.sounds[0].clear();
+                let act = brain.decide(&obs);
+                *labels.entry(brain.label).or_insert(0) += 1;
+                if brain.ffa && ffa_t < 0.0 {
+                    ffa_t = w.t;
+                }
+                if verbose && w.tick % 10 == 0 {
+                    let m = &w.mechs[0];
+                    println!("   t={:5.1} pos=({:6.1},{:6.1},{:5.1}) hp={:4.0} {:6} ffa={} seen_by={} mv=({:5.2},{:5.2}) boost={}", w.t, m.pos[0], m.pos[1], m.pos[2], m.hp, brain.label, brain.ffa as u8, seers, act["move"][0].as_f64().unwrap_or(0.0), act["move"][1].as_f64().unwrap_or(0.0), act["boost"]);
+                }
+                w.apply(0, &act);
+            }
+            // who has us in view
+            let me = w.mechs[0].clone();
+            let mut any = false;
+            let mut any_aim = false;
+            seers.clear();
+            for j in 1..16 {
+                let g = &w.mechs[j];
+                if !g.alive {
+                    continue;
+                }
+                let d = d2(&g.pos, &me.pos);
+                if d > 200.0 {
+                    continue;
+                }
+                let b = (me.pos[1] - g.pos[1]).atan2(me.pos[0] - g.pos[0]);
+                let off = wrap(b - g.aim[0]).abs();
+                if d > 45.0 && off > PI / 3.0 {
+                    continue;
+                }
+                if w.map.los([g.pos[0], g.pos[1], g.pos[2] + 8.0], [me.pos[0], me.pos[1], me.pos[2] + 4.5]) {
+                    any = true;
+                    seers.push_str(&format!("{}@{:.0}{} ", others[j - 1], d, if off < 0.17 { "!" } else { "" }));
+                    if off < 0.17 {
+                        any_aim = true;
+                    }
+                }
+            }
+            if any {
+                let k = if w.t < 30.0 { 0 } else if w.t < 90.0 { 1 } else { 2 };
+                seen[k] += DT;
+                if w.t < 120.0 {
+                    *seen_by_label.entry(brain.label).or_insert(0.0) += DT;
+                    *all_by_label.entry(brain.label).or_insert(0.0) += DT;
+                }
+            }
+            if any_aim {
+                aimed += DT;
+            }
+            w.step();
+        }
+        let m = &w.mechs[0];
+        println!("{} as mech {:2} (really placed {:2}, died {:6.1}): ffa at {:5.1} s ({}) | seen {:4.1} s of first 30, {:4.1} of next 60, {:5.1} later | aimed at {:5.1} s | zone dmg {:4.0} drone dmg {:4.0} | {:?}", rec["name"].as_str().unwrap_or(""), rid, real_place, real_death, ffa_t, brain.ffa_why, seen[0], seen[1], seen[2], aimed, m.dmg_zone, m.dmg_taken - m.dmg_zone, labels);
+        sum[0] += seen[0];
+        sum[1] += seen[1];
+        sum[2] += seen[2];
+        sum[3] += aimed;
+        sum[4] += if ffa_t >= 0.0 { ffa_t } else { 60.0 };
+        sum[5] += m.dmg_taken;
+        runs += 1;
+    }
+    if runs > 0 {
+        let r = runs as f32;
+        println!("seen seconds in the first 120 s by what the bot was doing (per run): {:?}", all_by_label.iter().map(|(k, v)| (*k, (v / r * 10.0).round() / 10.0)).collect::<Vec<_>>());
+        println!("SUMMARY {} policy {}: runs {}  seen {:.1} s of first 30, {:.1} of next 60, {:.1} later; aimed at {:.1} s; ffa flag at {:.1} s; damage from zone and drones {:.0}", rec["name"].as_str().unwrap_or(""), pol, runs, sum[0] / r, sum[1] / r, sum[2] / r, sum[3] / r, sum[4] / r, sum[5] / r);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("ghost") {
+        ghost_main(&args);
+        return;
+    }
     let dir = args.get(1).cloned().unwrap_or_else(|| "/arena".into());
     let matches: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
     let seed0: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -901,6 +1116,7 @@ fn main() {
     let verbose = args.get(6).is_some();
     let trace_idx: usize = std::env::var("SIM_TRACE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut total = 0.0;
+    let mut per_pol: std::collections::BTreeMap<String, (f32, u32, f32)> = std::collections::BTreeMap::new();
     let mut acc = [0u32; 4];
     let mut worst_ms = 0.0f64;
     let mut times: Vec<f32> = Vec::new();
@@ -908,7 +1124,7 @@ fn main() {
         let seed = seed0 + mi;
         let map = Map::load(&dir).expect("map");
         let n = map.gx * map.gy;
-        let mut w = World { map, pl: Planner::new(n), rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 0, zc: [41.3, -72.8], zr: 560.0, centers: vec![[41.3, -72.8]], events: vec![Vec::new(); 16], ffa, mine };
+        let mut w = World { map, pl: Planner::new(n), rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 0, zc: [41.3, -72.8], zr: 560.0, centers: vec![[41.3, -72.8]], events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa, mine, ghost: false };
         for _ in 0..8 {
             w.rng.f();
         }
@@ -945,7 +1161,12 @@ fn main() {
         for i in 0..16usize {
             let p = spawns[i];
             let z = w.map.support(p[0], p[1]);
-            let tier = if i < mine { 3 } else { [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3][(i - mine) % 15] };
+            let mut tier = if i < mine { 3 } else { [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3][(i - mine) % 15] };
+            if let Some(tv) = std::env::var("SIM_TIER").ok().and_then(|v| v.parse::<usize>().ok()) {
+                if i >= mine {
+                    tier = tv.min(3);
+                }
+            }
             let yaw = w.rng.f() * TAU - PI;
             w.mechs.push(Mech { pos: [p[0], p[1], z], vel: [0.0; 2], aim: [yaw, 0.0], hp: 1400.0, max_hp: 1400.0, energy: 100.0, alive: true, cubes: 0, gun_cd: 0.0, ammo: 12, reload: 0.0, slot1: None, w1_cd: 0.0, charge: 0.0, last_dmg_t: -10.0, last_spend_t: -10.0, mv: [0.0; 2], boost: false, jump: false, vz: 0.0, grounded: true, cmd_aim: [yaw, 0.0], fire: [false; 2], tier, path: Vec::new(), path_t: 0.0, strafe: 1.0, strafe_t: 0.0, noise: [0.0; 2], noise_t: 0.0, hold: p, kills: 0, death_t: -1.0, killed_by: String::new(), dmg_zone: 0.0, dmg_taken: 0.0, dmg_dealt: 0.0, stuck: 0, max_stuck: 0, cur_stuck: 0, seen_t: vec![-100.0; 16], wall_t: 0.0, shots: [0; 4] });
         }
@@ -967,7 +1188,19 @@ fn main() {
         }
         w.next_id = 100;
         let hello = json!({"type": "hello", "slot": 0, "seed": seed, "map": {"dir": dir}, "config": {"loot": {"pickup_radius": 4}}});
-        let mut brains: Vec<Brain> = (0..mine).map(|k| { let mut h = hello.clone(); h["seed"] = json!(seed * 31 + k as u64); Brain::new(&h) }).collect();
+        // SIM_POL="ffa,ffa,e,e": policy preset per bot (default: what the submitted binary runs)
+        let pols: Vec<String> = std::env::var("SIM_POL").map(|v| v.split(',').map(|x| x.trim().to_string()).collect()).unwrap_or_default();
+        let mut brains: Vec<Brain> = (0..mine)
+            .map(|k| {
+                let mut h = hello.clone();
+                h["seed"] = json!(seed * 31 + k as u64);
+                let mut b = Brain::new(&h);
+                if let Some(pn) = pols.get(k) {
+                    b.pol = mechbot::brain::Policy::named(pn);
+                }
+                b
+            })
+            .collect();
         let mut labels: std::collections::BTreeMap<&'static str, u32> = std::collections::BTreeMap::new();
         let mut place = vec![0usize; 16];
         let mut trace: Vec<String> = Vec::new();
@@ -991,6 +1224,7 @@ fn main() {
                     if i < mine {
                         let obs = w.observe(i);
                         w.events[i].clear();
+                        w.sounds[i].clear();
                         let t0 = std::time::Instant::now();
                         let act = brains[i].decide(&obs);
                         let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1009,7 +1243,7 @@ fn main() {
                             if verbose && w.tick % 100 == 0 {
                                 let m = &w.mechs[0];
                                 let (c, r, _, _, _, _, _) = w.zone(w.t);
-                                trace.push(format!("t={:5.1} pos=({:6.1},{:6.1}) hp={:4.0}/{:4.0} {} w1={:?} cubes={} alive={} zone_in={:5.1} ffa={}", w.t, m.pos[0], m.pos[1], m.hp, m.max_hp, brains[0].label, m.slot1, m.cubes, w.mechs.iter().filter(|x| x.alive).count(), r - d2(&m.pos, &c), brains[0].ffa));
+                                trace.push(format!("t={:5.1} pos=({:6.1},{:6.1}) hp={:4.0}/{:4.0} {} w1={:?} cubes={} alive={} zone_in={:5.1} ffa={} {}", w.t, m.pos[0], m.pos[1], m.hp, m.max_hp, brains[0].label, m.slot1, m.cubes, w.mechs.iter().filter(|x| x.alive).count(), r - d2(&m.pos, &c), brains[0].ffa, brains[0].ffa_why));
                             }
                         }
                         w.apply(i, &act);
@@ -1040,12 +1274,17 @@ fn main() {
             let m = &w.mechs[i];
             let pts = 16 - place[i];
             total += pts as f32;
+            let pn = pols.get(i).cloned().unwrap_or_else(|| "default".into());
+            let e = per_pol.entry(pn).or_insert((0.0f32, 0u32, 0.0f32));
+            e.0 += pts as f32;
+            e.1 += 1;
+            e.2 += if m.death_t < 0.0 { 480.0 } else { m.death_t };
             for k in 0..4 {
                 acc[k] += m.shots[k];
             }
             println!("match {} seed {} bot {}: place {:2} pts {:2} kills {} death_t {:6.1} by {:14} dealt {:6.0} taken {:6.0} zone_dmg {:5.0} stuck_ticks {} max_stuck {} w1 {:?} cubes {} labels {:?}", mi, seed, i, place[i], pts, m.kills, m.death_t, m.killed_by, m.dmg_dealt, m.dmg_taken, m.dmg_zone, m.stuck, m.max_stuck, m.slot1, m.cubes, if i == 0 { format!("{:?}", labels) } else { String::new() });
         }
-        println!("   prof ms (ingest, spot, loot, astar, total): {:?}", brains[0].prof);
+        println!("   prof ms (ingest, spot, loot, astar, total): {:?}  ffa flags: {:?}", brains[0].prof, brains.iter().map(|b| if b.ffa { b.ffa_why } else { "-" }).collect::<Vec<_>>());
         if verbose {
             for l in &trace {
                 println!("   {}", l);
@@ -1057,6 +1296,9 @@ fn main() {
         let _ = std::fs::write(path, txt.join("\n"));
     }
     println!("our gun: {} shots, {} hits on mechs ({:.0}%, shots at crates and drones count as misses); laser: {} shots, {} hits on mechs ({:.0}%)", acc[0], acc[1], 100.0 * acc[1] as f32 / acc[0].max(1) as f32, acc[2], acc[3], 100.0 * acc[3] as f32 / acc[2].max(1) as f32);
+    for (k, v) in &per_pol {
+        println!("policy {:8}: mean points {:.2}  mean time alive {:.0} s  over {} bot-matches", k, v.0 / v.1 as f32, v.2 / v.1 as f32, v.1);
+    }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f32| times[((times.len() as f32 - 1.0) * p) as usize];
     println!("mean points {:.2} over {} bot-matches; decision ms p50 {:.3} p99 {:.3} p99.9 {:.3} max {:.2}; over 5 ms: {} of {}", total / (matches as f32 * mine as f32), matches as usize * mine, pct(0.5), pct(0.99), pct(0.999), worst_ms, times.iter().filter(|x| **x > 5.0).count(), times.len());
