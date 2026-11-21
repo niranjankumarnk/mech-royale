@@ -247,29 +247,32 @@ pub struct Policy {
     pub dodge: bool,
     /// With an empty weapon slot, fetch a laser or lightning before any other loot.
     pub arm_first: bool,
+    /// After a fight, stay hidden until health is back above 85% before looting again.
+    pub heal: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false },
-            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false },
+            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
             _ => Policy::submitted(),
         }
     }
@@ -1989,6 +1992,7 @@ impl Brain {
 
         // ---- movement goal
         let mut label = "hold";
+        let mut resting = false;
         let mut loot: Option<Loot> = None;
         let nc_changed = d2(&self.spot_nc, &z.nc) > 1.0 || !self.spot_nc[0].is_finite();
         let want_spot = |b: &mut Brain, ev: bool| -> Option<[f32; 2]> {
@@ -2231,8 +2235,20 @@ impl Brain {
             let t0 = std::time::Instant::now();
             loot = self.choose_loot(soon, careful);
             self.prof[2] = self.prof[2].max(t0.elapsed().as_secs_f32() * 1000.0);
+            // heal between hunters: hurt after a fight, with nobody on us, stay hidden until the
+            // regeneration has done its work; only a weapon or cube a few steps away is worth leaving for
+            if self.pol.heal && !self.ffa && hpf < 0.85 && t - self.last_mech_hit_t < 45.0 {
+                if loot.map_or(false, |l| d2(&l.pos, &me.pos) > 30.0 || matches!(l.kind, LK::Npc | LK::Crate)) {
+                    loot = None;
+                }
+                resting = loot.is_none();
+            }
             self.loot = loot;
-            if let Some(l) = loot {
+            if resting {
+                label = "rest";
+                let g = want_spot(self, true).unwrap_or(me_p);
+                self.go_to(&mut a, g, 2.0, true);
+            } else if let Some(l) = loot {
                 label = "loot";
                 let d = d2(&l.pos, &me.pos);
                 let los = self.map.los(eye, [l.pos[0], l.pos[1], l.pos[2] + 1.5]);
