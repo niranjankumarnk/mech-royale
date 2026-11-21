@@ -259,37 +259,61 @@ pub struct Policy {
     pub backoff2: u8,
     /// When arming, a laser is worth walking up to 120 m further for than a lightning.
     pub laser_pref: bool,
+    /// Free-for-all: shoot first at a mech that is busy trading with someone else (losing health
+    /// to others, not facing us) while we are healthy.
+    pub vulture: bool,
+    /// Free-for-all: toughness upgrades (plating, armor, nanites) before damage.
+    pub ffa_tough: bool,
+    /// Free-for-all: after a fight, stay hidden and regenerate before looting again.
+    pub ffa_heal: bool,
+    /// Free-for-all: one mech on us and an even trade: shoot back instead of running (running
+    /// takes the same damage and deals none).
+    pub stand: bool,
+    /// Free-for-all: leave crates and drones alone (noise, drone fire, time in the open), and walk
+    /// below step-sound speed when the zone allows.
+    pub hide: bool,
+    /// Free-for-all: cubes are health and damage; take drones, crates and cubes more readily.
+    pub farm: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 0, laser_pref: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 0, laser_pref: true, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
             "m" => Policy { backoff2: 0, laser_pref: false, ..Policy::submitted() },
             "n1" => Policy { backoff2: 1, ..Policy::submitted() },
             "n2" => Policy { backoff2: 2, ..Policy::submitted() },
             "n3" => Policy { backoff2: 3, ..Policy::submitted() },
-            "k" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: false, backoff2: 0, laser_pref: false },
-            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false },
+            "k" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "j" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false, finish: false, backoff: false, backoff2: 0, laser_pref: false, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false },
+            "old" => Policy { vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false, ..Policy::submitted() },
+            "v" => Policy { vulture: true, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false, ..Policy::submitted() },
+            "t" => Policy { vulture: false, ffa_tough: true, ffa_heal: false, stand: false, hide: false, farm: false, ..Policy::submitted() },
+            "hl" => Policy { vulture: false, ffa_tough: false, ffa_heal: true, stand: false, hide: false, farm: false, ..Policy::submitted() },
+            "new" => Policy { vulture: true, ffa_tough: true, ffa_heal: true, stand: false, hide: false, farm: false, ..Policy::submitted() },
+            "st" => Policy { vulture: false, ffa_tough: false, ffa_heal: false, stand: true, hide: false, farm: false, ..Policy::submitted() },
+            "hide" => Policy { hide: true, ffa_heal: true, ..Policy::named("old") },
+            "farm" => Policy { farm: true, ..Policy::named("old") },
+            "vf" => Policy { farm: true, vulture: true, ffa_tough: true, ..Policy::named("old") },
             _ => Policy::submitted(),
         }
     }
@@ -319,6 +343,33 @@ const UPGRADE_ORDER: [&str; 22] = [
     "armor",
     "servos",
     "nanites",
+    "gun_velocity",
+    "reactor",
+    "capacitor",
+    "jets",
+    "gyros",
+    "sensors",
+    "lightning_chain",
+    "lightning_range",
+    "laser_pierce",
+    "mortar_reload",
+    "mortar_splash",
+    "mortar_velocity",
+];
+
+// Free-for-all: the teams that place best in the public showdowns take plating, armor and
+// nanites first; surviving longer is what scores there.
+const FFA_ORDER: [&str; 22] = [
+    "plating",
+    "armor",
+    "nanites",
+    "laser_damage",
+    "laser_charge",
+    "gun_mag",
+    "gun_damage",
+    "gun_rate",
+    "lightning_efficiency",
+    "servos",
     "gun_velocity",
     "reactor",
     "capacitor",
@@ -474,6 +525,8 @@ pub struct Brain {
     /// Last health seen per mech, and when we last hit each.
     hp_seen: HashMap<i64, (f32, f32)>,
     my_hit_t: HashMap<i64, f32>,
+    /// when each mech last lost health to somebody other than us
+    busy_t: HashMap<i64, f32>,
     hp_drops: u32,
     snd_ffa: bool,
     /// A mech that keeps shooting us: its id, since when, and its latest hit.
@@ -594,6 +647,7 @@ impl Brain {
             early_attackers: Vec::new(),
             hp_seen: HashMap::new(),
             my_hit_t: HashMap::new(),
+            busy_t: HashMap::new(),
             hp_drops: 0,
             snd_ffa: false,
             pursuer: (-1, 0.0, -100.0),
@@ -819,6 +873,9 @@ impl Brain {
                 if let Some(&(prev, pt)) = self.hp_seen.get(&id) {
                     let drop = prev - hp;
                     let mine = self.my_hit_t.get(&id).map_or(false, |ht| t - ht < 0.6);
+                    if t - pt < 0.25 && drop >= 30.0 && !mine {
+                        self.busy_t.insert(id, t);
+                    }
                     if t - pt < 0.25 && drop >= 44.0 && !mine {
                         let near25 = (drop - 25.0 * (drop / 25.0).round()).abs() < 2.5;
                         let two_drones_on_armor = (drop - 46.0).abs() < 1.6 || (drop - 42.0).abs() < 1.6;
@@ -1096,24 +1153,27 @@ impl Brain {
                 cands.push((Loot { kind: LK::Pickup, id: *id, pos: it.pos }, value));
             }
         }
+        let hide = self.pol.hide && self.ffa;
+        let farm = self.pol.farm && self.ffa;
         for (id, it) in &self.cubes {
             if enemy_near(&it.pos, 45.0) {
                 continue;
             }
-            cands.push((Loot { kind: LK::Cube, id: *id, pos: it.pos }, 80.0));
+            cands.push((Loot { kind: LK::Cube, id: *id, pos: it.pos }, if farm { 160.0 } else { 80.0 }));
         }
+
         for (id, it) in &self.crates {
-            if enemy_near(&it.pos, 70.0) || npc_near(&it.pos, 50.0) {
+            if hide || enemy_near(&it.pos, if farm { 50.0 } else { 70.0 }) || npc_near(&it.pos, 50.0) {
                 continue;
             }
-            cands.push((Loot { kind: LK::Crate, id: *id, pos: it.pos }, 55.0));
+            cands.push((Loot { kind: LK::Crate, id: *id, pos: it.pos }, if farm { 90.0 } else { 55.0 }));
         }
-        if hp_frac > 0.6 && !enemy_near(&me.pos, 150.0) {
+        if !hide && hp_frac > if farm { 0.5 } else { 0.6 } && !enemy_near(&me.pos, if farm { 100.0 } else { 150.0 }) {
             for (id, n) in &self.npcs {
-                if enemy_near(&n.pos, 120.0) {
+                if enemy_near(&n.pos, if farm { 90.0 } else { 120.0 }) {
                     continue;
                 }
-                cands.push((Loot { kind: LK::Npc, id: *id, pos: n.pos }, 90.0));
+                cands.push((Loot { kind: LK::Npc, id: *id, pos: n.pos }, if farm { 170.0 } else { 90.0 }));
             }
         }
         for dr in &self.drops {
@@ -1784,7 +1844,7 @@ impl Brain {
         if let Some(ch) = &self.offer {
             let mut best = (usize::MAX, 0usize);
             for (i, id) in ch.iter().enumerate() {
-                let order: &[&str] = if self.pol.lightning { &LIGHTNING_ORDER } else { &UPGRADE_ORDER };
+                let order: &[&str] = if self.pol.lightning { &LIGHTNING_ORDER } else if self.pol.ffa_tough && self.ffa { &FFA_ORDER } else { &UPGRADE_ORDER };
                 let rank = order.iter().position(|u| *u == id.as_str()).unwrap_or(100);
                 if rank < best.0 {
                     best = (rank, i);
@@ -1897,6 +1957,9 @@ impl Brain {
             if self.ffa {
                 // free-for-all: only take fights we should win
                 fight = ttk_them < ttk_me * 0.85 || p.hp < 300.0 || (endgame && ttk_them < ttk_me * 1.3);
+                if self.pol.stand && combat.len() == 1 && p.hostile && hpf > 0.35 && ttk_them < ttk_me * 1.25 {
+                    fight = true;
+                }
                 if t < self.fight_until && hpf > 0.3 {
                     fight = true;
                 }
@@ -1950,7 +2013,26 @@ impl Brain {
         } else if !evade && !self.regen_mode {
             // a lone mech in view that is not looking at us: open on its back when the odds are good
             let vis: Vec<&Th> = ths.iter().filter(|h| h.los && h.d < 200.0).collect();
-            if vis.len() == 1 {
+            if self.pol.vulture && self.ffa && hpf > 0.55 && !vis.iter().any(|h| h.facing) {
+                // free-for-all: a mech busy trading with someone else is the cheapest kill there is;
+                // shoot first while it is looking the other way
+                let mut best: Option<(f32, Th)> = None;
+                for h in &vis {
+                    let busy = self.busy_t.get(&h.id).map_or(false, |bt| t - bt < 2.5);
+                    if busy && h.d > 25.0 && h.d < 190.0 && h.hp < me.hp * 1.1 {
+                        let sc = h.hp + 2.0 * h.d;
+                        if best.map_or(true, |b| sc < b.0) {
+                            best = Some((sc, **h));
+                        }
+                    }
+                }
+                if let Some((_, p)) = best {
+                    primary = Some(p);
+                    fight = true;
+                    self.fight_until = t + 2.0;
+                }
+            }
+            if !fight && vis.len() == 1 {
                 let p = vis[0];
                 let myd = dps_of(my_gun, my_laser, my_light, false, p.d, me.cubes) * 1.4;
                 let good = if self.ffa { hpf > 0.7 && p.hp / myd < 0.45 * (me.hp / p.dps.max(1.0)) && p.hp < 0.6 * me.hp } else { hpf > 0.8 && armed && p.d < 170.0 };
@@ -2339,7 +2421,7 @@ impl Brain {
             self.prof[2] = self.prof[2].max(t0.elapsed().as_secs_f32() * 1000.0);
             // heal between hunters: hurt after a fight, with nobody on us, stay hidden until the
             // regeneration has done its work; only a weapon or cube a few steps away is worth leaving for
-            if self.pol.heal && !self.ffa && hpf < 0.85 && t - self.last_mech_hit_t < 45.0 {
+            if ((self.pol.heal && !self.ffa) || (self.pol.ffa_heal && self.ffa)) && hpf < 0.85 && t - self.last_mech_hit_t < 45.0 {
                 if loot.map_or(false, |l| d2(&l.pos, &me.pos) > 30.0 || matches!(l.kind, LK::Npc | LK::Crate)) {
                     loot = None;
                 }
@@ -2371,6 +2453,16 @@ impl Brain {
                 if let Some(g) = g {
                     self.go_to(&mut a, g, 2.0, true);
                 }
+            }
+        }
+
+        // ---- hidden play: walk below the step-sound speed while nothing presses
+        if self.pol.hide && self.ffa && !soon && matches!(label, "hold" | "loot" | "rest") && t - self.last_hit_t > 6.0 {
+            let n = (a.mv[0] * a.mv[0] + a.mv[1] * a.mv[1]).sqrt();
+            let k = 4.6 / me.walk.max(1.0);
+            if n > k {
+                a.mv = [a.mv[0] / n * k, a.mv[1] / n * k];
+                a.boost = false;
             }
         }
 
