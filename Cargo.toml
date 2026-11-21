@@ -1,0 +1,26 @@
+[package]
+name = "bingbu-mech"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Survival-first bot for the mechfight/1 protocol (Builders Buildathon, Mech Royale track)"
+
+[lib]
+name = "mechbot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "sim"
+path = "src/bin/sim.rs"
+
+[dependencies]
+serde_json = "=1.0.140"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "unwind"
