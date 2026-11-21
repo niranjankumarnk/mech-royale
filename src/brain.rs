@@ -198,6 +198,7 @@ struct Tgt {
     vel: [f32; 3],
     r: f32,
     h: f32,
+    mech: bool,
 }
 
 struct Act {
@@ -242,27 +243,30 @@ pub struct Policy {
     /// are taken at 30 m where lightning hits without aiming and chains through a pack, and
     /// upgrades favour lightning and energy.
     pub lightning: bool,
+    /// Step out of the path of gun bullets that are already in the air.
+    pub dodge: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false },
             _ => Policy::submitted(),
         }
     }
@@ -366,6 +370,9 @@ pub struct Brain {
     cubes: HashMap<i64, Item>,
     pickups: HashMap<i64, Item>,
     drops: Vec<DropObs>,
+    /// Enemy bullets in view: position and velocity.
+    shots: Vec<([f32; 3], [f32; 3])>,
+    pub dodges: u32,
     offer: Option<Vec<String>>,
     last_hit_t: f32,
     last_hit_bearing: f32,
@@ -450,6 +457,7 @@ pub struct Brain {
     pub label: &'static str,
     /// Debug text for the simulator trace.
     pub dbg: String,
+    pub gate: [u32; 6],
     /// Worst time seen per section, in ms: ingest, spot choice, loot choice, path planning, whole decision.
     pub prof: [f32; 5],
 }
@@ -488,6 +496,8 @@ impl Brain {
             cubes: HashMap::new(),
             pickups: HashMap::new(),
             drops: Vec::new(),
+            shots: Vec::new(),
+            dodges: 0,
             offer: None,
             last_hit_t: -100.0,
             last_hit_bearing: 0.0,
@@ -560,6 +570,7 @@ impl Brain {
             label: "",
             prof: [0.0; 5],
             dbg: String::new(),
+            gate: [0; 6],
         }
     }
 
@@ -686,6 +697,14 @@ impl Brain {
         sync(&mut self.cubes, &o["cubes"], t, &self.map, eye);
         sync(&mut self.pickups, &o["pickups"], t, &self.map, eye);
 
+        self.shots.clear();
+        if let Some(a) = o["projectiles"].as_array() {
+            for pr in a {
+                if matches!(pr["kind"].as_str(), Some("gun") | Some("npc")) {
+                    self.shots.push((v3(&pr["pos"]), v3(&pr["vel"])));
+                }
+            }
+        }
         self.drops.clear();
         if let Some(a) = o["drops"].as_array() {
             for d in a {
@@ -1302,6 +1321,84 @@ impl Brain {
         best.map(|b| b.1)
     }
 
+    /// Bullets already in the air fly straight, so where each will be is known. If the move we
+    /// are about to make gets us hit, pick the move (eight directions or standing still) that
+    /// leaves the nearest bullet farthest away. Only bullets more than a tenth of a second out can
+    /// be stepped around; at close range there is nothing to gain.
+    fn dodge(&self, mv: [f32; 2]) -> Option<[f32; 2]> {
+        let me = &self.me;
+        let rad = 2.5 * (1.0 + 0.05 * me.cubes as f32) + 0.8;
+        let v0 = [me.vel[0], me.vel[1]];
+        let mut inc: Vec<(f32, [f32; 2])> = Vec::new();
+        for (p, v) in &self.shots {
+            let r = [p[0] - me.pos[0], p[1] - me.pos[1]];
+            let vv = v[0] * v[0] + v[1] * v[1];
+            if vv < 100.0 {
+                continue;
+            }
+            let ts = -(r[0] * v[0] + r[1] * v[1]) / vv;
+            if !(0.1..=0.9).contains(&ts) {
+                continue;
+            }
+            let bz = p[2] + v[2] * ts;
+            if bz < me.pos[2] - 1.5 || bz > me.pos[2] + me.height + 1.5 {
+                continue;
+            }
+            // would it pass anywhere near us at all?
+            let at = [p[0] + v[0] * ts, p[1] + v[1] * ts];
+            if d2(&at, &me.pos) > 14.0 {
+                continue;
+            }
+            inc.push((ts, at));
+        }
+        if inc.is_empty() {
+            return None;
+        }
+        let miss = |c: [f32; 2]| -> f32 {
+            let vt = [c[0] * me.walk, c[1] * me.walk];
+            let dv = [vt[0] - v0[0], vt[1] - v0[1]];
+            let dn = (dv[0] * dv[0] + dv[1] * dv[1]).sqrt();
+            let tacc = dn / 58.5;
+            let mut worst = f32::INFINITY;
+            for (ts, at) in &inc {
+                let ta = ts.min(tacc);
+                let k = if dn > 0.01 { 0.5 * 58.5 * ta * ta / dn } else { 0.0 };
+                let mut q = [me.pos[0] + v0[0] * ta + dv[0] * k, me.pos[1] + v0[1] * ta + dv[1] * k];
+                if *ts > tacc {
+                    q[0] += vt[0] * (ts - tacc);
+                    q[1] += vt[1] * (ts - tacc);
+                }
+                worst = worst.min(d2(&q, at));
+            }
+            worst
+        };
+        let base = miss(mv);
+        if base >= rad {
+            return None;
+        }
+        let mut best = (base + 0.6, mv);
+        let x = me.pos[0];
+        let y = me.pos[1];
+        for k in 0..9 {
+            let c = if k == 8 { [0.0, 0.0] } else { let a = k as f32 * TAU / 8.0; [a.cos(), a.sin()] };
+            if k < 8 {
+                let (px, py) = (x + c[0] * 5.0, y + c[1] * 5.0);
+                if !self.map.passable(self.map.cell_of(px, py)) || !self.map.walk_clear(x, y, px, py) || d2(&[px, py], &self.zone.c) > self.zone.r - 4.0 {
+                    continue;
+                }
+            }
+            let m = miss(c).min(rad + 2.0) + 0.2 * (c[0] * mv[0] + c[1] * mv[1]);
+            if m > best.0 {
+                best = (m, c);
+            }
+        }
+        if best.1 == mv {
+            None
+        } else {
+            Some(best.1)
+        }
+    }
+
     // ------------------------------------------------------------------ roofs
     /// A place to climb roof `r` from: a free ground spot a few metres outside one of its edges
     /// with nothing but that roof's own wall in between, and the landing spot just inside the edge.
@@ -1616,6 +1713,11 @@ impl Brain {
             let in_range = d3(&muzzle, &p) < w.range - 3.0;
             if !laser_now {
                 aim = ga;
+            }
+            if tg.mech {
+                // gate statistics: [decisions with a mech target, no line of sight, out of range, not aligned, reloading, fired]
+                self.gate[0] += 1;
+                if !los { self.gate[1] += 1; } else if !in_range { self.gate[2] += 1; } else if w.reload > 0.0 { self.gate[4] += 1; } else if !aligned(&ga) { self.gate[3] += 1; } else { self.gate[5] += 1; }
             }
             if los && in_range && aligned(&ga) && w.reload <= 0.0 {
                 a.fire[i] = true;
@@ -2127,17 +2229,25 @@ impl Brain {
             }
         }
 
+        // ---- step out of the way of bullets in the air
+        if self.pol.dodge && me.grounded && !urgent && matches!(self.roof_st, RoofSt::Off | RoofSt::Approach) {
+            if let Some(c) = self.dodge(a.mv) {
+                a.mv = c;
+                self.dodges += 1;
+            }
+        }
+
         // ---- aim and fire
         let mut tgt: Option<Tgt> = None;
         let mut allow_laser = false;
         if let Some(h) = &roof_tgt {
             let k = 1.0 + 0.05 * h.cubes as f32;
-            tgt = Some(Tgt { pos: h.pos, vel: h.vel, r: 2.5 * k, h: 9.0 * k });
+            tgt = Some(Tgt { pos: h.pos, vel: h.vel, r: 2.5 * k, h: 9.0 * k, mech: true });
             allow_laser = true;
         } else if let Some(p) = &primary {
             if fight || p.hostile || p.facing {
                 let k = 1.0 + 0.05 * p.cubes as f32;
-                tgt = Some(Tgt { pos: p.pos, vel: p.vel, r: 2.5 * k, h: 9.0 * k });
+                tgt = Some(Tgt { pos: p.pos, vel: p.vel, r: 2.5 * k, h: 9.0 * k, mech: true });
                 allow_laser = fight;
             }
         }
@@ -2146,7 +2256,7 @@ impl Brain {
             if t - self.npc_hit_t < 3.0 {
                 if let Some(n) = self.npcs.get(&self.npc_hit_by) {
                     if t - n.seen_t < 0.35 && d2(&n.pos, &me.pos) < 90.0 {
-                        tgt = Some(Tgt { pos: n.pos, vel: n.vel, r: 1.8, h: 3.5 });
+                        tgt = Some(Tgt { pos: n.pos, vel: n.vel, r: 1.8, h: 3.5, mech: false });
                         allow_laser = true;
                     }
                 }
@@ -2159,14 +2269,14 @@ impl Brain {
                     LK::Npc if d < 75.0 => {
                         if let Some(n) = self.npcs.get(&l.id) {
                             if t - n.seen_t < 0.35 {
-                                tgt = Some(Tgt { pos: n.pos, vel: n.vel, r: 1.8, h: 3.5 });
+                                tgt = Some(Tgt { pos: n.pos, vel: n.vel, r: 1.8, h: 3.5, mech: false });
                                 allow_laser = true;
                             }
                         }
                     }
                     LK::Crate if d < 48.0 => {
                         if self.crates.get(&l.id).map_or(false, |c| t - c.seen_t < 0.35) {
-                            tgt = Some(Tgt { pos: l.pos, vel: [0.0; 3], r: 1.4, h: 2.4 });
+                            tgt = Some(Tgt { pos: l.pos, vel: [0.0; 3], r: 1.4, h: 2.4, mech: false });
                             allow_laser = true;
                         }
                     }

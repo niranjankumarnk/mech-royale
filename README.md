@@ -17,7 +17,8 @@ In order of priority:
    inside the next circle early, and boosts when it is late.
 3. **Contact.** Faces whoever is shooting (rear armor), leads the gun, charges and releases the
    laser on target, fires lightning inside its cone, strafes with random reversals at medium range,
-   and breaks line of sight to regenerate when it is losing.
+   steps out of the path of gun bullets already in the air (useful beyond about 100 m), and breaks
+   line of sight to regenerate when it is losing.
    - Against the practice squad (house bots that never fight each other) every hunter is fought.
    - A free-for-all is recognised within seconds: a death it did not cause in the first 30 s (two
      later), or two of three softer signs (gunfire all around, other mechs losing health to each

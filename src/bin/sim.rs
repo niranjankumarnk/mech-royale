@@ -101,6 +101,9 @@ struct Proj {
     dmg: f32,
     ttl: f32,
     kind: &'static str,
+    /// which of our bots it was aimed at (-1 none) and the range band (0 under 100 m, 1 beyond)
+    at: i64,
+    band: usize,
 }
 struct Npc {
     id: i64,
@@ -138,6 +141,8 @@ struct World {
     mine: usize,
     /// ghost-replay mode: the other mechs replay a recorded match and cannot be hurt
     ghost: bool,
+    /// per our bot, per range band: house gun shots aimed at it, and how many hit
+    aimed: [[[u32; 2]; 2]; 16],
 }
 
 const TIER_SIGMA: [f32; 4] = [5.0, 3.0, 1.8, 0.7];
@@ -696,7 +701,22 @@ impl World {
                 let pitch = m.aim[1] + self.rng.gauss() * sg;
                 let d = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin()];
                 self.next_id += 1;
-                self.projs.push(Proj { id: self.next_id, owner: i as i64, pos: muzzle, vel: [d[0] * 252.0, d[1] * 252.0, d[2] * 252.0], dmg: 45.0, ttl: 230.0 / 252.0, kind: "gun" });
+                let mut at = -1i64;
+                let mut band = 0usize;
+                if i >= self.mine {
+                    for j in 0..self.mine {
+                        let o = &self.mechs[j];
+                        let dd = d2(&o.pos, &m.pos);
+                        if o.alive && dd < 240.0 && wrap((o.pos[1] - m.pos[1]).atan2(o.pos[0] - m.pos[0]) - m.aim[0]).abs() < 0.12 {
+                            at = j as i64;
+                            band = if dd < 100.0 { 0 } else { 1 };
+                        }
+                    }
+                    if at >= 0 {
+                        self.aimed[at as usize][band][0] += 1;
+                    }
+                }
+                self.projs.push(Proj { id: self.next_id, owner: i as i64, pos: muzzle, vel: [d[0] * 252.0, d[1] * 252.0, d[2] * 252.0], dmg: 45.0, ttl: 230.0 / 252.0, kind: "gun", at, band });
                 self.emit_sound("gun", m.pos, i, 320.0);
                 let mm = &mut self.mechs[i];
                 mm.shots[0] += 1;
@@ -815,7 +835,7 @@ impl World {
                 let pitch = (o.pos[2] + 4.5 - np[2] - 2.0).atan2(d.max(1.0));
                 self.next_id += 1;
                 let id = self.npcs[k].id;
-                self.projs.push(Proj { id: self.next_id, owner: id, pos: [np[0], np[1], np[2] + 2.0], vel: [pitch.cos() * yaw.cos() * 90.0, pitch.cos() * yaw.sin() * 90.0, pitch.sin() * 90.0], dmg: 25.0, ttl: 2.0, kind: "npc" });
+                self.projs.push(Proj { id: self.next_id, owner: id, pos: [np[0], np[1], np[2] + 2.0], vel: [pitch.cos() * yaw.cos() * 90.0, pitch.cos() * yaw.sin() * 90.0, pitch.sin() * 90.0], dmg: 25.0, ttl: 2.0, kind: "npc", at: -1, band: 0 });
                 self.npcs[k].cd = 1.0;
             }
         }
@@ -863,6 +883,10 @@ impl World {
                 }
             }
             if let Some((_, id)) = hit {
+                let (pa, pb) = (self.projs[k].at, self.projs[k].band);
+                if pa >= 0 && id == pa {
+                    self.aimed[pa as usize][pb][1] += 1;
+                }
                 if id < 100 && owner >= 0 && owner < 100 {
                     self.mechs[owner as usize].shots[1] += 1;
                 }
@@ -943,7 +967,7 @@ fn ghost_main(args: &[String]) {
         }
         let map = Map::load(&dir).expect("map");
         let n = map.gx * map.gy;
-        let mut w = World { map, pl: Planner::new(n), rng: Rng(0x9E3779B97F4A7C15 ^ (rid as u64 + 7)), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 100, zc: [41.3, -72.8], zr: 560.0, centers: Vec::new(), events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa: true, mine: 1, ghost: true };
+        let mut w = World { map, pl: Planner::new(n), rng: Rng(0x9E3779B97F4A7C15 ^ (rid as u64 + 7)), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 100, zc: [41.3, -72.8], zr: 560.0, centers: Vec::new(), events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa: true, mine: 1, ghost: true, aimed: [[[0; 2]; 2]; 16] };
         for zph in rec["zone"].as_array().unwrap() {
             w.centers.push([zph["center"][0].as_f64().unwrap() as f32, zph["center"][1].as_f64().unwrap() as f32]);
         }
@@ -1116,6 +1140,8 @@ fn main() {
     let verbose = args.get(6).is_some();
     let trace_idx: usize = std::env::var("SIM_TRACE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut total = 0.0;
+    let mut gate = [0u32; 6];
+    let mut aim_pol: std::collections::BTreeMap<String, [[u32; 2]; 2]> = std::collections::BTreeMap::new();
     let mut per_pol: std::collections::BTreeMap<String, (f32, u32, f32)> = std::collections::BTreeMap::new();
     let mut acc = [0u32; 4];
     let mut worst_ms = 0.0f64;
@@ -1124,7 +1150,7 @@ fn main() {
         let seed = seed0 + mi;
         let map = Map::load(&dir).expect("map");
         let n = map.gx * map.gy;
-        let mut w = World { map, pl: Planner::new(n), rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 0, zc: [41.3, -72.8], zr: 560.0, centers: vec![[41.3, -72.8]], events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa, mine, ghost: false };
+        let mut w = World { map, pl: Planner::new(n), rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), t: 0.0, tick: 0, mechs: Vec::new(), projs: Vec::new(), npcs: Vec::new(), crates: Vec::new(), cubes: Vec::new(), picks: Vec::new(), next_id: 0, zc: [41.3, -72.8], zr: 560.0, centers: vec![[41.3, -72.8]], events: vec![Vec::new(); 16], sounds: vec![Vec::new(); 16], ffa, mine, ghost: false, aimed: [[[0; 2]; 2]; 16] };
         for _ in 0..8 {
             w.rng.f();
         }
@@ -1275,6 +1301,8 @@ fn main() {
             let pts = 16 - place[i];
             total += pts as f32;
             let pn = pols.get(i).cloned().unwrap_or_else(|| "default".into());
+            let ea = aim_pol.entry(pn.clone()).or_insert([[0u32; 2]; 2]);
+            for b in 0..2 { for q in 0..2 { ea[b][q] += w.aimed[i][b][q]; } }
             let e = per_pol.entry(pn).or_insert((0.0f32, 0u32, 0.0f32));
             e.0 += pts as f32;
             e.1 += 1;
@@ -1284,6 +1312,7 @@ fn main() {
             }
             println!("match {} seed {} bot {}: place {:2} pts {:2} kills {} death_t {:6.1} by {:14} dealt {:6.0} taken {:6.0} zone_dmg {:5.0} stuck_ticks {} max_stuck {} w1 {:?} cubes {} labels {:?}", mi, seed, i, place[i], pts, m.kills, m.death_t, m.killed_by, m.dmg_dealt, m.dmg_taken, m.dmg_zone, m.stuck, m.max_stuck, m.slot1, m.cubes, if i == 0 { format!("{:?}", labels) } else { String::new() });
         }
+        for k in 0..6 { gate[k] += brains[0].gate[k]; }
         println!("   prof ms (ingest, spot, loot, astar, total): {:?}  ffa flags: {:?}", brains[0].prof, brains.iter().map(|b| if b.ffa { b.ffa_why } else { "-" }).collect::<Vec<_>>());
         if verbose {
             for l in &trace {
@@ -1296,6 +1325,10 @@ fn main() {
         let _ = std::fs::write(path, txt.join("\n"));
     }
     println!("our gun: {} shots, {} hits on mechs ({:.0}%, shots at crates and drones count as misses); laser: {} shots, {} hits on mechs ({:.0}%)", acc[0], acc[1], 100.0 * acc[1] as f32 / acc[0].max(1) as f32, acc[2], acc[3], 100.0 * acc[3] as f32 / acc[2].max(1) as f32);
+    println!("gun gate [target, no LOS, out of range, not aligned, reloading, fired]: {:?}", gate);
+    for (k, v) in &aim_pol {
+        println!("policy {:8}: house gun shots at us under 100 m: {} fired, {:.0}% hit; beyond 100 m: {} fired, {:.0}% hit", k, v[0][0], 100.0 * v[0][1] as f32 / v[0][0].max(1) as f32, v[1][0], 100.0 * v[1][1] as f32 / v[1][0].max(1) as f32);
+    }
     for (k, v) in &per_pol {
         println!("policy {:8}: mean points {:.2}  mean time alive {:.0} s  over {} bot-matches", k, v.0 / v.1 as f32, v.2 / v.1 as f32, v.1);
     }
