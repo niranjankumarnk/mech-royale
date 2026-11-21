@@ -279,7 +279,7 @@ pub struct Policy {
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 0, laser_pref: true, vulture: false, ffa_tough: false, ffa_heal: false, stand: false, hide: false, farm: false }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true, finish: true, backoff: true, backoff2: 0, laser_pref: true, vulture: false, ffa_tough: true, ffa_heal: false, stand: false, hide: false, farm: false }
     }
 
     /// Named presets for the simulator.
