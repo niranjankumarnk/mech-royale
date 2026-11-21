@@ -26,7 +26,8 @@ In order of priority:
      where nobody is looking, and fights only with a clear advantage or when one mech has kept
      after it for 10 s.
    - For the first 20 s of any match, before the mode is known, it behaves the careful way.
-4. **Loot.** Takes the nearest laser or lightning (a laser replaces a lightning), collects cubes,
+4. **Loot.** Wants lightning plus laser (the gun gives way to the second of them) and closes to
+   30 m when it holds lightning; collects cubes,
    shoots crates and drones when no mech is near, and goes for a supply drop only when nobody is
    near it. Upgrades are picked from a fixed order, damage first.
 5. **Position.** Otherwise holds a covered spot near the edge of the next circle, out of sight of
