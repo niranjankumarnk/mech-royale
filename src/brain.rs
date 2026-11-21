@@ -227,7 +227,7 @@ struct Act {
 
 /// Experiment switch: fight from a spot with a covered step next to it, reload behind cover and
 /// step out of the way of a charging laser. Off = strafe in the open as in version 1.
-const COVER_STEPS: bool = false;
+const COVER_STEPS: bool = true;
 
 const UPGRADE_ORDER: [&str; 22] = [
     "armor",
