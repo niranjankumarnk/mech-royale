@@ -25,6 +25,10 @@ path = "src/bin/mapcheck.rs"
 name = "feed"
 path = "src/bin/feed.rs"
 
+[[bin]]
+name = "poltest"
+path = "src/bin/poltest.rs"
+
 [dependencies]
 serde_json = "=1.0.140"
 

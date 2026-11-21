@@ -238,26 +238,31 @@ pub struct Policy {
     /// us no closer to where we are going, jump and jet until the feet clear it (replaces the
     /// one-second hop of version 1). This is what gets the mech out of the stadium bowl.
     pub climb: bool,
+    /// Lightning doctrine: the wanted loadout is lightning plus laser (the gun gives way), fights
+    /// are taken at 30 m where lightning hits without aiming and chains through a pack, and
+    /// upgrades favour lightning and energy.
+    pub lightning: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false },
             _ => Policy::submitted(),
         }
     }
@@ -295,6 +300,32 @@ const UPGRADE_ORDER: [&str; 22] = [
     "sensors",
     "lightning_chain",
     "lightning_range",
+    "laser_pierce",
+    "mortar_reload",
+    "mortar_splash",
+    "mortar_velocity",
+];
+
+// Upgrade order for the lightning doctrine: lightning itself and the energy it runs on first.
+const LIGHTNING_ORDER: [&str; 22] = [
+    "lightning_efficiency",
+    "lightning_chain",
+    "laser_damage",
+    "reactor",
+    "lightning_range",
+    "plating",
+    "capacitor",
+    "armor",
+    "laser_charge",
+    "gun_mag",
+    "gun_damage",
+    "gun_rate",
+    "servos",
+    "nanites",
+    "jets",
+    "gyros",
+    "gun_velocity",
+    "sensors",
     "laser_pierce",
     "mortar_reload",
     "mortar_splash",
@@ -983,8 +1014,9 @@ impl Brain {
         let have = |k: WK| me.w.iter().any(|w| w.map_or(false, |w| w.kind == k));
         let free_slot = me.w.iter().any(|w| w.is_none());
         let mut cands: Vec<(Loot, f32)> = Vec::new();
-        let upgrade_to_laser = !free_slot && have(WK::Lightning) && !have(WK::Laser);
-        if free_slot || upgrade_to_laser {
+        let upgrade_to_laser = !self.pol.lightning && !free_slot && have(WK::Lightning) && !have(WK::Laser);
+        let gun_gives_way = self.pol.lightning && !free_slot && have(WK::Gun);
+        if free_slot || upgrade_to_laser || gun_gives_way {
             for (id, it) in &self.pickups {
                 let k = match it.kind {
                     Some(k) => k,
@@ -996,7 +1028,17 @@ impl Brain {
                 if enemy_near(&it.pos, 60.0) || npc_near(&it.pos, 48.0) {
                     continue;
                 }
-                let value = if upgrade_to_laser { 70.0 } else if k == WK::Laser { 260.0 } else { 200.0 };
+                let value = if self.pol.lightning {
+                    // lightning first; the second special weapon is worth less of a detour
+                    let base = if k == WK::Lightning { 260.0 } else { 220.0 };
+                    if gun_gives_way { base * 0.5 } else { base }
+                } else if upgrade_to_laser {
+                    70.0
+                } else if k == WK::Laser {
+                    260.0
+                } else {
+                    200.0
+                };
                 cands.push((Loot { kind: LK::Pickup, id: *id, pos: it.pos }, value));
             }
         }
@@ -1602,7 +1644,8 @@ impl Brain {
         if let Some(ch) = &self.offer {
             let mut best = (usize::MAX, 0usize);
             for (i, id) in ch.iter().enumerate() {
-                let rank = UPGRADE_ORDER.iter().position(|u| *u == id.as_str()).unwrap_or(100);
+                let order: &[&str] = if self.pol.lightning { &LIGHTNING_ORDER } else { &UPGRADE_ORDER };
+                let rank = order.iter().position(|u| *u == id.as_str()).unwrap_or(100);
                 if rank < best.0 {
                     best = (rank, i);
                 }
@@ -1617,6 +1660,19 @@ impl Brain {
                     if k != WK::Mortar && !have(k) && d2(&it.pos, &me.pos) < self.pickup_r - 0.4 && (it.pos[2] - me.pos[2]).abs() < 3.7 {
                         a.take = Some(*id);
                         break;
+                    }
+                }
+            }
+        } else if self.pol.lightning {
+            // lightning doctrine: lightning and laser are the pair to hold; the gun gives way
+            if let Some(gslot) = me.w.iter().position(|w| w.map_or(false, |w| w.kind == WK::Gun)) {
+                for (id, it) in &self.pickups {
+                    if let Some(k) = it.kind {
+                        if (k == WK::Lightning || k == WK::Laser) && !have(k) && d2(&it.pos, &me.pos) < self.pickup_r - 0.4 && (it.pos[2] - me.pos[2]).abs() < 3.7 {
+                            a.take = Some(*id);
+                            a.drop = Some(gslot as i64);
+                            break;
+                        }
                     }
                 }
             }
@@ -1980,7 +2036,7 @@ impl Brain {
             label = "fight";
             self.loot = None;
             let p = primary.unwrap();
-            let want = if my_light && !my_laser {
+            let want = if my_light && (!my_laser || self.pol.lightning) {
                 28.0
             } else if my_laser {
                 125.0
