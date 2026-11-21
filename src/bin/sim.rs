@@ -914,6 +914,11 @@ fn main() {
                         assert_eq!(act["tick"], obs["tick"]);
                         if i == 0 {
                             *labels.entry(brains[0].label).or_insert(0) += 1;
+                            if verbose && std::env::var_os("MECH_DEBUG").is_some() && w.tick % 10 == 0 {
+                                let m = &w.mechs[0];
+                                let (c, r, nc, nr, _, _, _) = w.zone(w.t);
+                                trace.push(format!("t={:5.1} pos=({:6.1},{:6.1}) {} zin={:5.1} nin={:5.1} | {}", w.t, m.pos[0], m.pos[1], brains[0].label, r - d2(&m.pos, &c), nr - d2(&m.pos, &nc), brains[0].dbg));
+                            }
                             if verbose && w.tick % 100 == 0 {
                                 let m = &w.mechs[0];
                                 let (c, r, _, _, _, _, _) = w.zone(w.t);

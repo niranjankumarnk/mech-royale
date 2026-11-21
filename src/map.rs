@@ -30,6 +30,10 @@ pub struct Map {
     pub gx: usize,
     pub gy: usize,
     pub blocked: Vec<bool>,
+    /// Headroom under an elevated bridge over this cell (infinite elsewhere).
+    pub clear: Vec<f32>,
+    /// Headroom the mech needs right now (its height plus a margin); set by the brain.
+    pub need_h: f32,
     pub surf: Vec<f32>,
     /// 0 = blocked, 1..3 = cells to the nearest blocked cell, 4 = further.
     pub wall_near: Vec<u8>,
@@ -90,10 +94,14 @@ impl Map {
     pub fn flat() -> Map {
         let nx = 1070;
         let ny = 724;
-        Map::build(vec![0.0; nx * ny], nx, ny, -513.0, -334.0, [-512.38, 555.08, -333.09, 388.64], &Value::Null)
+        Map::build(vec![0.0; nx * ny], nx, ny, -513.0, -334.0, [-512.38, 555.08, -333.09, 388.64], &Value::Null, R_INFLATE)
     }
 
     pub fn load(dir: &str) -> Result<Map, String> {
+        Map::load_with(dir, R_INFLATE)
+    }
+
+    pub fn load_with(dir: &str, r_inflate: f32) -> Result<Map, String> {
         let wtxt = std::fs::read_to_string(format!("{}/v2/world.json", dir)).map_err(|e| format!("world.json: {}", e))?;
         let w: Value = serde_json::from_str(&wtxt).map_err(|e| format!("world.json: {}", e))?;
         let t = &w["terrain"];
@@ -122,10 +130,10 @@ impl Map {
             b["minY"].as_f64().unwrap_or(miny as f64) as f32,
             b["maxY"].as_f64().unwrap_or((miny + ny as f32) as f64) as f32,
         ];
-        Ok(Map::build(terr, nx, ny, minx, miny, bounds, &w["prisms"]))
+        Ok(Map::build(terr, nx, ny, minx, miny, bounds, &w["prisms"], r_inflate))
     }
 
-    fn build(terr: Vec<f32>, nx: usize, ny: usize, minx: f32, miny: f32, bounds: [f32; 4], prisms: &Value) -> Map {
+    fn build(terr: Vec<f32>, nx: usize, ny: usize, minx: f32, miny: f32, bounds: [f32; 4], prisms: &Value, r_inflate: f32) -> Map {
         let n = nx * ny;
         let mut gtop = terr.clone();
         let mut walkh = terr.clone();
@@ -185,9 +193,9 @@ impl Map {
                                 walkh[k] = walkh[k].max(top);
                                 gtop[k] = gtop[k].max(top);
                             } else {
+                                // walked under when the headroom allows (checked per nav cell)
                                 ebase[k] = ebase[k].min(base);
                                 etop[k] = etop[k].max(top);
-                                solid[k] = true;
                             }
                         } else if top - g > 1.0 {
                             solid[k] = true;
@@ -204,8 +212,9 @@ impl Map {
         let gy = ny / 2;
         let gn = gx * gy;
         let mut blocked = vec![false; gn];
+        let mut clear = vec![f32::INFINITY; gn];
         let mut surf = vec![0.0f32; gn];
-        let r2 = R_INFLATE * R_INFLATE;
+        let r2 = r_inflate * r_inflate;
         for cj in 0..gy {
             for ci in 0..gx {
                 let c = cj * gx + ci;
@@ -222,15 +231,23 @@ impl Map {
                         if vi < 0 || vj < 0 || vi >= nx as isize || vj >= ny as isize {
                             continue;
                         }
-                        if solid[vj as usize * nx + vi as usize] {
+                        let k = vj as usize * nx + vi as usize;
+                        if solid[k] {
                             b = true;
                             break 'o;
+                        }
+                        if ebase[k].is_finite() {
+                            clear[c] = clear[c].min(ebase[k] - terr[k]);
                         }
                     }
                 }
                 let wx = minx + 2.0 * ci as f32 + 0.5;
                 let wy = miny + 2.0 * cj as f32 + 0.5;
-                if wx < bounds[0] + R_INFLATE + 0.5 || wx > bounds[1] - R_INFLATE - 0.5 || wy < bounds[2] + R_INFLATE + 0.5 || wy > bounds[3] - R_INFLATE - 0.5 {
+                if wx < bounds[0] + r_inflate + 0.5 || wx > bounds[1] - r_inflate - 0.5 || wy < bounds[2] + r_inflate + 0.5 || wy > bounds[3] - r_inflate - 0.5 {
+                    b = true;
+                }
+                // an overhang lower than a mech with no cubes is a wall for everyone
+                if clear[c] < 9.6 {
                     b = true;
                 }
                 blocked[c] = b;
@@ -272,7 +289,7 @@ impl Map {
             }
             frontier = next;
         }
-        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, surf, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3] };
+        let mut m = Map { nx, ny, minx, miny, terr, gtop, ebase, etop, solid, walkh, gx, gy, blocked, clear, need_h: 9.4, surf, wall_near, comp: vec![0; gn], main_comp: 0, bx0: bounds[0], bx1: bounds[1], by0: bounds[2], by1: bounds[3] };
         m.label_components();
         m
     }
@@ -322,6 +339,12 @@ impl Map {
         }
         self.comp = comp;
         self.main_comp = best.1;
+    }
+
+    /// Free of walls and with enough headroom for the mech as it is now.
+    #[inline]
+    pub fn passable(&self, c: usize) -> bool {
+        !self.blocked[c] && self.clear[c] >= self.need_h
     }
 
     /// Can a mech walk from cell a up or down to neighbour b (the slope / ledge rule, kept conservative)?
@@ -445,7 +468,7 @@ impl Map {
             if c == prev {
                 continue;
             }
-            if self.blocked[c] {
+            if !self.passable(c) {
                 return false;
             }
             let dh = self.surf[c] - self.surf[prev];
@@ -459,7 +482,7 @@ impl Map {
 
     /// Nearest free cell to `c`, searched in growing square rings.
     pub fn nearest_free(&self, c: usize, max_ring: isize, need_main: bool) -> Option<usize> {
-        let ok = |k: usize| -> bool { !self.blocked[k] && (!need_main || self.comp[k] == self.main_comp) };
+        let ok = |k: usize| -> bool { self.passable(k) && (!need_main || self.comp[k] == self.main_comp) };
         if ok(c) {
             return Some(c);
         }
@@ -582,7 +605,7 @@ impl Planner {
                     continue;
                 }
                 let n = nj as usize * m.gx + ni as usize;
-                if m.blocked[n] {
+                if !m.passable(n) {
                     continue;
                 }
                 let diag = dx != 0 && dy != 0;

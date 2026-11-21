@@ -15,9 +15,13 @@ In order of priority:
    prints anything else on stdout, catches panics and answers with a neutral action, exits on `end`.
 2. **Zone.** Knows where the circle will be at any time in the current phase, heads for a spot
    inside the next circle early, and boosts when it is late.
-3. **Contact.** Faces whoever is shooting (rear armor), leads the gun, charges and releases the
-   laser on target, fires lightning inside its cone, strafes with random reversals, and breaks line
-   of sight to regenerate when it is losing.
+3. **Contact.** Faces whoever is shooting (rear armor), leads the gun (linear lead including
+   vertical speed), charges and releases the laser on target, fires lightning inside its cone.
+   It fights from long range (about 145 m, where the weaker house bots stop hitting), strafes
+   with random reversals, boosts away when it is being run down, and breaks line of sight to
+   regenerate when it is losing. (A switch in `src/brain.rs`, `COVER_STEPS`, adds fighting from a
+   spot with a covered step next to it: reload behind cover, step out of the way of a charging
+   laser. It is scored as a separate experiment.)
    - Against the practice squad (house bots that never fight each other) every hunter is fought.
    - Once two deaths happen that it did not cause, it knows it is in a free-for-all and only takes
      fights it should win.
@@ -39,6 +43,7 @@ A*, and a hop-and-jet routine frees the mech when it stops making progress.
 | `src/map.rs` | map loading, navigation grid, line of sight, A* |
 | `src/brain.rs` | memory, zone timing, fight / evade / loot / hold decisions, aiming |
 | `src/bin/sim.rs` | a rough local simulator used only to catch gross bugs (not in the image) |
+| `src/bin/mapcheck.rs` | dev tool: compares the map model with positions taken from public replays (not in the image) |
 | `Dockerfile` | the submission image |
 
 ## Build, check, run
