@@ -19,24 +19,27 @@ In order of priority:
    laser on target, fires lightning inside its cone, strafes with random reversals at medium range,
    and breaks line of sight to regenerate when it is losing.
    - Against the practice squad (house bots that never fight each other) every hunter is fought.
-   - Once two deaths happen that it did not cause, it knows it is in a free-for-all and only takes
-     fights it should win.
+   - A free-for-all is recognised within seconds: a death it did not cause in the first 30 s (two
+     later), or two of three softer signs (gunfire all around, other mechs losing health to each
+     other, two different attackers before its first kill). From then on it stays out of sight of
+     every mech it knows about, runs to the nearest cover by walking distance when seen, loots only
+     where nobody is looking, and fights only with a clear advantage or when one mech has kept
+     after it for 10 s.
+   - For the first 20 s of any match, before the mode is known, it behaves the careful way.
 4. **Loot.** Takes the nearest laser or lightning (a laser replaces a lightning), collects cubes,
    shoots crates and drones when no mech is near, and goes for a supply drop only when nobody is
    near it. Upgrades are picked from a fixed order, damage first.
 5. **Position.** Otherwise holds a covered spot near the edge of the next circle, out of sight of
    every mech it knows about, and keeps its torso scanning.
-6. **Roofs (practice squad only, switch `ROOF` in `src/brain.rs`).** It picks the nearest big flat
-   roof well inside the next circle, jets up one of its walls, and fights from there: it rests in
-   the middle where the ground near the building cannot see it, steps to the edge to shoot down,
-   steps back to reload, and walks off on the side of the next circle when the zone calls. A roof
-   it fails to climb twice is not tried again, and if hunters come up after it and it is losing,
-   it drops off the far side.
+
+Behaviour switches live in `Policy` in `src/brain.rs`. Two that were tried and scored worse in
+practice are kept switched off: fighting from roofs, and fighting at long range.
 
 Navigation uses the organisers' map (`v2/world.json`, `v2/terrain.i16`, mounted at `/arena`):
 buildings and bridges are rasterised onto a 2 m grid inflated by the mech radius, paths come from
-A*, and a hop-and-jet routine frees the mech when it stops making progress. Roofs are found as
-flat groups of building cells at least 9 m deep and 11 to 45 m above the ground.
+A*. Walkability is checked metre by metre on the terrain grid. When the mech is pressed against
+something, or three seconds bring it no closer to its goal, it jumps and jets over the obstacle
+(this is how it leaves the stadium bowl or a courtyard).
 
 ## Layout
 
@@ -47,6 +50,7 @@ flat groups of building cells at least 9 m deep and 11 to 45 m above the ground.
 | `src/brain.rs` | memory, zone timing, fight / evade / loot / hold decisions, aiming |
 | `src/bin/sim.rs` | a rough local simulator used only to catch gross bugs (not in the image) |
 | `src/bin/mapcheck.rs` | dev tool: compares the map model with positions taken from public replays (not in the image) |
+| `src/bin/poltest.rs` | dev tool: feeds one synthetic situation to a named policy (not in the image) |
 | `src/bin/feed.rs` | dev tool: runs the brain over a recorded observation stream and prints its decisions (not in the image) |
 | `Dockerfile` | the submission image |
 
