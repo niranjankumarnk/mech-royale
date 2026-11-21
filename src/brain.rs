@@ -189,8 +189,7 @@ struct Th {
     hp: f32,
     dps: f32,
     cubes: i32,
-    /// Its laser is charging right now.
-    charging: bool,
+    lightning: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -199,18 +198,6 @@ struct Tgt {
     vel: [f32; 3],
     r: f32,
     h: f32,
-}
-
-/// Where to stand in a fight: a spot that sees the target and, when there is one, a spot a few
-/// steps away that the target cannot see (used while the gun reloads and the laser recharges).
-#[derive(Clone, Copy)]
-struct FightPlan {
-    peek: [f32; 2],
-    hide: Option<[f32; 2]>,
-    has_los: bool,
-    tick: i64,
-    target: i64,
-    tpos: [f32; 2],
 }
 
 struct Act {
@@ -224,10 +211,6 @@ struct Act {
     take: Option<i64>,
     drop: Option<i64>,
 }
-
-/// Experiment switch: fight from a spot with a covered step next to it, reload behind cover and
-/// step out of the way of a charging laser. Off = strafe in the open as in version 1.
-const COVER_STEPS: bool = true;
 
 const UPGRADE_ORDER: [&str; 22] = [
     "armor",
@@ -315,6 +298,8 @@ pub struct Brain {
     fight_until: f32,
     evade_until: f32,
     dcount: i64,
+    /// Set when the zone forces a move; cleared only once we are properly inside the next circle.
+    zone_latch: bool,
     /// False while every death so far was our own kill: the practice format (one squad of house
     /// bots that never fight each other). True once somebody else has killed somebody.
     pub ffa: bool,
@@ -322,11 +307,8 @@ pub struct Brain {
     start_alive: i32,
     mismatch_t: f32,
     regen_mode: bool,
-    plan: Option<FightPlan>,
-    last_tgt: i64,
-    zone_latch: bool,
     pub label: &'static str,
-    /// Debug text for the simulator trace (goal, zone timing).
+    /// Debug text for the simulator trace.
     pub dbg: String,
     /// Worst time seen per section, in ms: ingest, spot choice, loot choice, path planning, whole decision.
     pub prof: [f32; 5],
@@ -393,14 +375,12 @@ impl Brain {
             fight_until: -1.0,
             evade_until: -1.0,
             dcount: 0,
+            zone_latch: false,
             ffa: false,
             kills: 0,
             start_alive: -1,
             mismatch_t: -1.0,
             regen_mode: false,
-            plan: None,
-            last_tgt: -1,
-            zone_latch: false,
             label: "",
             prof: [0.0; 5],
             dbg: String::new(),
@@ -453,6 +433,7 @@ impl Brain {
         }
         let eye = [self.me.pos[0], self.me.pos[1], self.me.pos[2] + self.me.eye_h];
         let me_pos = self.me.pos;
+        // headroom needed under bridges (the mech grows with cubes)
         self.map.need_h = self.me.height + 0.4;
 
         // mechs and drones
@@ -568,11 +549,6 @@ impl Brain {
                     }
                     Some("kill") => {
                         self.kills += 1;
-                        // the dead mech's track must not keep us away from the cubes it dropped
-                        if let Some(id) = e["target"].as_i64() {
-                            self.mechs.remove(&id);
-                        }
-                        self.plan = None;
                     }
                     Some("took") | Some("take_failed") => {
                         if let Some(id) = e["id"].as_i64() {
@@ -863,12 +839,6 @@ impl Brain {
             a.mv = [0.0, 0.0];
             return;
         }
-        if dg < 22.0 && self.map.walk_clear(x, y, goal[0], goal[1]) {
-            // short and clear: walk straight, no search
-            a.mv = [(goal[0] - x) / dg.max(0.01), (goal[1] - y) / dg.max(0.01)];
-            self.path.clear();
-            return;
-        }
         let need = self.path.is_empty() || self.dcount - self.path_tick >= 3 || d2(&self.path_goal, &goal) > 4.0;
         if need {
             let sc = self.map.nearest_free(self.map.cell_of(x, y), 5, false);
@@ -963,9 +933,7 @@ impl Brain {
         }
     }
 
-    /// Strafe across the line to the target with random reversals, closing or opening the range
-    /// toward `want`. With `keep_los` the next few metres must still see the target.
-    fn fight_move(&mut self, a: &mut Act, tp: [f32; 3], want: f32, keep_los: bool) {
+    fn fight_move(&mut self, a: &mut Act, tp: [f32; 3], want: f32) {
         let x = self.me.pos[0];
         let y = self.me.pos[1];
         let dx = tp[0] - x;
@@ -984,28 +952,19 @@ impl Brain {
             0.0
         };
         let sd0 = self.strafe_dir;
-        let chest = [tp[0], tp[1], tp[2] + 4.5];
         let mut chosen: Option<([f32; 2], f32)> = None;
-        // preferred: range correction plus strafe; then strafe only; then range correction only
-        for (rad, sd) in [(radial, sd0), (radial, -sd0), (0.0, sd0), (0.0, -sd0), (radial, 0.0)] {
-            if rad == 0.0 && sd == 0.0 {
-                continue;
-            }
-            let vx = rad * u[0] - sd * u[1];
-            let vy = rad * u[1] + sd * u[0];
+        for sd in [sd0, -sd0] {
+            let vx = radial * u[0] - sd * u[1];
+            let vy = radial * u[1] + sd * u[0];
             let n = (vx * vx + vy * vy).sqrt().max(0.01);
             let v = [vx / n, vy / n];
-            let px = x + v[0] * 6.0;
-            let py = y + v[1] * 6.0;
+            let px = x + v[0] * 7.0;
+            let py = y + v[1] * 7.0;
             let inside = d2(&[px, py], &self.zone.c) < self.zone.r - 6.0;
-            if !inside || !self.map.passable(self.map.cell_of(px, py)) || !self.map.walk_clear(x, y, px, py) {
-                continue;
+            if inside && self.map.passable(self.map.cell_of(px, py)) && self.map.walk_clear(x, y, px, py) {
+                chosen = Some((v, sd));
+                break;
             }
-            if keep_los && !self.map.los([px, py, self.map.ground(px, py) + self.me.muzzle_h], chest) {
-                continue;
-            }
-            chosen = Some((v, if sd == 0.0 { sd0 } else { sd }));
-            break;
         }
         match chosen {
             Some((v, sd)) => {
@@ -1013,170 +972,7 @@ impl Brain {
                 self.strafe_dir = sd;
             }
             None => {
-                a.mv = [0.0, 0.0];
-            }
-        }
-    }
-
-    /// Choose where to fight `p` from: in range, in sight of it, out of sight of everyone else,
-    /// with a step into cover next to it.
-    fn plan_fight(&mut self, p: &Th, want: f32, soon: bool) -> FightPlan {
-        let phase = self.rand() * TAU;
-        let me_p = [self.me.pos[0], self.me.pos[1]];
-        let t = self.t;
-        let zm = self.zm();
-        let m = &self.map;
-        let z = &self.zone;
-        let muzzle_h = self.me.muzzle_h;
-        let t_muzzle = [p.pos[0], p.pos[1], p.pos[2] + 7.0 * (1.0 + 0.05 * p.cubes as f32)];
-        let t_chest = [p.pos[0], p.pos[1], p.pos[2] + 4.5];
-        let others: Vec<[f32; 3]> = self.mechs.iter().filter(|(id, tr)| **id != p.id && t - tr.seen_t < 6.0).map(|(_, tr)| [tr.pos[0], tr.pos[1], tr.pos[2] + 7.0]).collect();
-        let hidden = |q: [f32; 2], from: [f32; 3]| -> bool {
-            let g = m.ground(q[0], q[1]);
-            !m.los(from, [q[0], q[1], g + 4.5]) && !m.los(from, [q[0], q[1], g + 8.6])
-        };
-        let mut cands: Vec<([f32; 2], f32)> = Vec::with_capacity(64);
-        cands.push((me_p, 3.0));
-        if let Some(pl) = &self.plan {
-            if pl.target == p.id && pl.has_los {
-                cands.push((pl.peek, 6.0));
-            }
-        }
-        for (ri, r) in [7.0f32, 14.0, 24.0, 36.0].iter().enumerate() {
-            let n = 8 + 2 * ri;
-            for k in 0..n {
-                let a = phase + k as f32 * TAU / n as f32;
-                cands.push(([me_p[0] + r * a.cos(), me_p[1] + r * a.sin()], 0.0));
-            }
-        }
-        let mut scored: Vec<(f32, [f32; 2])> = Vec::with_capacity(cands.len());
-        for (q, bonus) in cands {
-            let c = m.cell_of(q[0], q[1]);
-            if !m.passable(c) {
-                continue;
-            }
-            let q = if bonus > 0.0 { q } else { m.center(c) };
-            let g = m.surf[c];
-            if (g - self.me.pos[2]).abs() > 6.0 {
-                continue;
-            }
-            if !m.los([q[0], q[1], g + muzzle_h], t_chest) {
-                continue;
-            }
-            let d = d2(&q, &p.pos);
-            let trav = d2(&q, &me_p);
-            let mut s = bonus - (d - want).abs() * 0.12 - trav * 0.25;
-            if trav > 3.0 && !m.walk_clear(me_p[0], me_p[1], q[0], q[1]) {
-                s -= 12.0;
-            }
-            for o in &others {
-                if d2(&q, o) < 260.0 && m.los_coarse(*o, [q[0], q[1], g + 4.5]) {
-                    s -= 22.0;
-                }
-            }
-            if d2(&q, &z.c) > z.r - 6.0 {
-                s -= 200.0;
-            }
-            if soon && z.nr - d2(&q, &z.nc) < zm {
-                s -= 40.0;
-            }
-            for n in self.npcs.values() {
-                if d2(&q, &n.pos) < 48.0 {
-                    s -= 12.0;
-                }
-            }
-            scored.push((s, q));
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut best: Option<(f32, [f32; 2], Option<[f32; 2]>)> = None;
-        for (s0, q) in scored.iter().take(8) {
-            // a covered step next to it
-            let mut hide: Option<[f32; 2]> = None;
-            let mut s = *s0;
-            'h: for r in [4.0f32, 7.0, 10.0] {
-                for k in 0..8 {
-                    let a = k as f32 * TAU / 8.0;
-                    let h = [q[0] + r * a.cos(), q[1] + r * a.sin()];
-                    let c = m.cell_of(h[0], h[1]);
-                    if !m.passable(c) || !m.walk_clear(q[0], q[1], h[0], h[1]) {
-                        continue;
-                    }
-                    if d2(&h, &z.c) > z.r - 6.0 {
-                        continue;
-                    }
-                    if hidden(h, t_muzzle) {
-                        hide = Some(h);
-                        s += 18.0 - r;
-                        if others.iter().all(|o| hidden(h, *o)) {
-                            s += 5.0;
-                        }
-                        break 'h;
-                    }
-                }
-            }
-            if best.map_or(true, |b| s > b.0) {
-                best = Some((s, *q, hide));
-            }
-        }
-        match best {
-            Some((_, peek, hide)) => FightPlan { peek, hide, has_los: true, tick: self.dcount, target: p.id, tpos: [p.pos[0], p.pos[1]] },
-            None => FightPlan { peek: me_p, hide: None, has_los: false, tick: self.dcount, target: p.id, tpos: [p.pos[0], p.pos[1]] },
-        }
-    }
-
-    /// One decision of fight movement: out at the peek spot while a weapon is ready, in cover
-    /// while the gun reloads and the laser recharges.
-    fn fight_step(&mut self, a: &mut Act, p: &Th, want: f32, soon: bool, dodge: bool) {
-        let me = self.me.clone();
-        let me_p = [me.pos[0], me.pos[1]];
-        let need = match &self.plan {
-            None => true,
-            Some(pl) => pl.target != p.id || self.dcount - pl.tick >= 5 || d2(&pl.tpos, &p.pos) > 12.0,
-        };
-        if need {
-            let pl = self.plan_fight(p, want, soon);
-            self.plan = Some(pl);
-        }
-        let pl = match self.plan {
-            Some(pl) => pl,
-            None => return,
-        };
-        if !pl.has_los {
-            // nowhere near sees it. Strafe if it is in view anyway; go after it only to finish a
-            // wounded target while we are healthy; otherwise wait for it to come to us.
-            if p.los {
-                self.fight_move(a, p.pos, want, false);
-            } else if p.hp < 800.0 && me.hp > 0.5 * me.max_hp {
-                self.go_to(a, [p.pos[0], p.pos[1]], 60.0, false);
-            }
-            return;
-        }
-        // a laser is charging at us: step behind cover until it has been let go
-        if dodge {
-            if let Some(h) = pl.hide {
-                if d2(&me_p, &h) < 9.0 {
-                    self.go_to(a, h, 0.8, false);
-                    return;
-                }
-            }
-        }
-        let mut ready = false;
-        for w in me.w.iter().flatten() {
-            match w.kind {
-                WK::Gun => ready |= w.reload <= 0.7,
-                WK::Laser => ready |= w.cooldown <= 0.0 && w.charge >= w.charge_t - 0.5,
-                WK::Lightning => ready |= p.d < w.range && me.energy > 15.0,
-                _ => {}
-            }
-        }
-        match pl.hide {
-            Some(h) if !ready => self.go_to(a, h, 0.8, false),
-            _ => {
-                if d2(&me_p, &pl.peek) > 6.0 || !p.los {
-                    self.go_to(a, pl.peek, 0.8, false);
-                } else {
-                    self.fight_move(a, p.pos, want, true);
-                }
+                a.mv = [radial * u[0], radial * u[1]];
             }
         }
     }
@@ -1190,13 +986,12 @@ impl Brain {
         [dy.atan2(dx), dz.atan2(h)]
     }
 
-    fn aim_fire(&mut self, a: &mut Act, tg: &Tgt, allow_laser: bool, precharge: bool) {
+    fn aim_fire(&mut self, a: &mut Act, tg: &Tgt, allow_laser: bool) {
         let me = self.me.clone();
         let muzzle = [me.pos[0], me.pos[1], me.pos[2] + me.muzzle_h];
         let tc = [tg.pos[0], tg.pos[1], tg.pos[2] + tg.h * 0.5];
-        // linear lead including vertical speed: best of the rules tried on public replay tracks
-        let lat = 0.05f32;
-        let at = |tt: f32| -> [f32; 3] { [tc[0] + tg.vel[0] * tt, tc[1] + tg.vel[1] * tt, tc[2] + tg.vel[2] * tt] };
+        let lat = 0.075f32;
+        let at = |tt: f32| -> [f32; 3] { [tc[0] + tg.vel[0] * tt, tc[1] + tg.vel[1] * tt, tc[2]] };
         let direct_p = at(lat);
         let direct = Brain::angles(&muzzle, &direct_p);
         let dist = d3(&muzzle, &tc);
@@ -1222,7 +1017,7 @@ impl Brain {
                         } else {
                             a.fire[i] = true;
                         }
-                    } else if allow_laser && (los || precharge) && dist < w.range - 8.0 && w.cooldown <= 0.12 {
+                    } else if allow_laser && los && dist < w.range - 8.0 && w.cooldown <= 0.12 {
                         a.fire[i] = true;
                     }
                 }
@@ -1312,10 +1107,9 @@ impl Brain {
         let zm = self.zm();
         let d_safe = (d2(&me_p, &z.nc) - (z.nr - zm)).max(0.0);
         let t_out = self.time_out(me_p, zm * 0.5);
-        // leave early: detours around buildings can halve the speed made good toward the circle
-        let need = d_safe / (me.walk * 0.45) + 10.0;
+        let need = d_safe / (me.walk * 0.6) + 6.0;
         // once the zone has us moving, keep going until we are properly inside the next circle
-        // (otherwise the bot dithers on its edge between "safe" and "late")
+        // (version 1 dithered on its edge between "safe" and "late" and took zone damage)
         if !me.in_zone || (t_out - t) < need {
             self.zone_latch = true;
         } else if d_safe <= 0.0 {
@@ -1336,15 +1130,16 @@ impl Brain {
             let bearing = (me.pos[1] - tr.pos[1]).atan2(me.pos[0] - tr.pos[0]);
             let facing = wrap(tr.aim[0] - bearing).abs() < 0.35;
             let hostile = t - tr.hit_me_t < 4.0;
-            ths.push(Th { id: *id, pos: tr.pos, vel: tr.vel, d, los, facing, hostile, hp: tr.hp, dps: dps_of(tr.gun, tr.laser, tr.lightning, tr.mortar, d, tr.cubes), cubes: tr.cubes, charging: tr.charging && tr.laser });
+            ths.push(Th { id: *id, pos: tr.pos, vel: tr.vel, d, los, facing, hostile, hp: tr.hp, dps: dps_of(tr.gun, tr.laser, tr.lightning, tr.mortar, d, tr.cubes), cubes: tr.cubes, lightning: tr.lightning });
         }
         let combat: Vec<Th> = ths.iter().filter(|h| h.los && (h.hostile || (h.facing && h.d < 250.0) || h.d < 55.0)).cloned().collect();
-        // target: finish the weak, prefer the near, and do not hop between targets on small differences
-        let cur_tgt = self.last_tgt;
-        let prio = |h: &Th| -> f32 { h.hp + 3.0 * h.d - if h.hostile { 150.0 } else { 0.0 } - if h.id == cur_tgt { 200.0 } else { 0.0 } };
         let mut primary: Option<Th> = None;
         for h in &combat {
-            if primary.map_or(true, |p| prio(h) < prio(&p)) {
+            let better = match &primary {
+                None => true,
+                Some(p) => (h.hostile && !p.hostile) || (h.hostile == p.hostile && h.d < p.d),
+            };
+            if better {
                 primary = Some(*h);
             }
         }
@@ -1440,26 +1235,21 @@ impl Brain {
             let g = if z.nr < 10.0 { Some(z.nc) } else { want_spot(self, false) };
             let g = g.unwrap_or(z.nc);
             self.go_to(&mut a, g, 1.5, false);
-            a.boost = me.energy > 8.0 && (!me.in_zone || (t_out - t) < need * 0.75);
+            a.boost = me.energy > 8.0 && (!me.in_zone || (t_out - t) < need * 0.6);
         } else if fight {
             label = "fight";
             self.loot = None;
             let p = primary.unwrap();
-            self.last_tgt = p.id;
-            // Long range is where the weaker house bots stop hitting (public replays: medium bots land
-            // nothing past 120 m, hard ones 13%) while a led gun and a laser still do. Close in only
-            // to finish a nearly dead target with lightning.
-            let want = if my_light && p.hp < 500.0 && p.d < 70.0 { 30.0 } else { 145.0 };
-            if COVER_STEPS {
-                let dodge = combat.iter().any(|h| h.charging && h.facing);
-                self.fight_step(&mut a, &p, want, soon, dodge);
+            let want = if my_light && !my_laser {
+                28.0
+            } else if my_laser {
+                125.0
+            } else if p.lightning {
+                95.0
             } else {
-                self.fight_move(&mut a, p.pos, want, false);
-            }
-            // being run down: use the boost to keep the gap
-            if p.d < 80.0 && want > 100.0 && me.energy > 35.0 && (a.mv[0].abs() + a.mv[1].abs()) > 0.5 {
-                a.boost = true;
-            }
+                85.0
+            };
+            self.fight_move(&mut a, p.pos, want);
         } else if evade {
             label = "evade";
             self.loot = None;
@@ -1479,7 +1269,7 @@ impl Brain {
                 match l.kind {
                     LK::Npc => {
                         if d < 42.0 && los {
-                            self.fight_move(&mut a, l.pos, 30.0, false);
+                            self.fight_move(&mut a, l.pos, 30.0);
                         } else {
                             self.go_to(&mut a, [l.pos[0], l.pos[1]], 20.0, true);
                         }
@@ -1540,9 +1330,7 @@ impl Brain {
             }
         }
         if let Some(tg) = tgt {
-            // charge the laser behind cover when we are about to step out to a spot that sees the target
-            let precharge = fight && self.plan.map_or(false, |pl| pl.has_los && d2(&pl.peek, &me_p) < 12.0);
-            self.aim_fire(&mut a, &tg, allow_laser, precharge);
+            self.aim_fire(&mut a, &tg, allow_laser);
         } else {
             // never leave a laser charging with nothing to shoot
             let mut look: Option<f32> = None;
@@ -1600,7 +1388,7 @@ impl Brain {
         }
 
         if std::env::var_os("MECH_DEBUG").is_some() {
-            self.dbg = format!("goal=({:.0},{:.0}) spot={:?} path={}{} d_safe={:.0} t_out={:.1} need={:.1} urgent={} mv=({:.2},{:.2}) boost={}", self.path_goal[0], self.path_goal[1], self.spot.map(|s| (s[0] as i32, s[1] as i32)), self.path.len(), if self.path_found { "F" } else { "p" }, d_safe, t_out - t, need, urgent, a.mv[0], a.mv[1], a.boost);
+            self.dbg = format!("d_safe={:.0} t_out={:.1} need={:.1} urgent={} mv=({:.2},{:.2}) boost={}", d_safe, t_out - t, need, urgent, a.mv[0], a.mv[1], a.boost);
         }
         self.label = label;
         self.prof[4] = self.prof[4].max(t_start.elapsed().as_secs_f32() * 1000.0);
