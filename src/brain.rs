@@ -249,30 +249,33 @@ pub struct Policy {
     pub arm_first: bool,
     /// After a fight, stay hidden until health is back above 85% before looting again.
     pub heal: bool,
+    /// With two or more hunters on us, fight from a spot fewer of them can see.
+    pub split: bool,
 }
 
 impl Policy {
     /// What the submitted binary runs.
     pub fn submitted() -> Policy {
-        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true }
+        Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: true }
     }
 
     /// Named presets for the simulator.
     pub fn named(name: &str) -> Policy {
         match name {
-            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false },
-            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false },
-            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false },
-            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false },
-            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false },
-            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
-            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false },
+            "e" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "l" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: false, lightning: true, dodge: false, arm_first: false, heal: false, split: false },
+            "i" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: true, split: false },
+            "h" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: true, heal: false, split: false },
+            "g" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: true, arm_first: false, heal: false, split: false },
+            "nd" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ec" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ffa3n" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: false, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "r" => Policy { roof: true, ffa_fast: false, opening_caution: false, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ffa" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: false, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ffa2" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ffa3" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "ffa4" => Policy { roof: false, ffa_fast: true, opening_caution: true, near_cover: true, unseen: true, roof_ffa: true, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
+            "e2" => Policy { roof: false, ffa_fast: false, opening_caution: false, near_cover: true, unseen: false, roof_ffa: false, climb: true, lightning: false, dodge: false, arm_first: false, heal: false, split: false },
             _ => Policy::submitted(),
         }
     }
@@ -398,6 +401,8 @@ pub struct Brain {
     spot_tick: i64,
     spot_evade: bool,
     spot_nc: [f32; 2],
+    split_spot: Option<[f32; 2]>,
+    split_tick: i64,
     cover: Option<[f32; 2]>,
     cover_tick: i64,
     cover_seen: Vec<u32>,
@@ -524,6 +529,8 @@ impl Brain {
             spot_tick: -100,
             spot_evade: false,
             spot_nc: [f32::NAN, f32::NAN],
+            split_spot: None,
+            split_tick: -100,
             cover: None,
             cover_tick: -100,
             cover_seen: vec![0; n],
@@ -2175,9 +2182,47 @@ impl Brain {
                     }
                 }
             }
-            match fetch {
-                Some(g) => self.go_to(&mut a, g, 1.0, false),
-                None => self.fight_move(&mut a, p.pos, want),
+            // one hunter at a time: with two or more on us, stand where the target can be shot
+            // and as few of the others as possible can see us
+            let mut split: Option<[f32; 2]> = None;
+            if self.pol.split && !self.ffa && combat.len() >= 2 && fetch.is_none() {
+                if self.dcount - self.split_tick >= 5 {
+                    let others: Vec<[f32; 3]> = combat.iter().filter(|h| h.id != p.id).map(|h| [h.pos[0], h.pos[1], h.pos[2] + 7.0]).collect();
+                    let chest = [p.pos[0], p.pos[1], p.pos[2] + 4.5];
+                    let seen_at = |b: &Brain, q: [f32; 2]| -> usize { others.iter().filter(|o| !b.hidden_from(q, **o)).count() };
+                    let here = seen_at(self, me_p);
+                    let mut best: Option<(f32, [f32; 2], usize)> = None;
+                    for r in [6.0f32, 12.0, 18.0] {
+                        for k in 0..12 {
+                            let ang = k as f32 * TAU / 12.0 + r;
+                            let c = self.map.cell_of(me_p[0] + r * ang.cos(), me_p[1] + r * ang.sin());
+                            if !self.map.passable(c) {
+                                continue;
+                            }
+                            let q = self.map.center(c);
+                            if d2(&q, &z.c) > z.r - 6.0 || !self.map.los([q[0], q[1], self.map.surf[c] + me.muzzle_h], chest) {
+                                continue;
+                            }
+                            let n = seen_at(self, q);
+                            let clear = self.map.walk_clear(me_p[0], me_p[1], q[0], q[1]);
+                            if !clear {
+                                continue;
+                            }
+                            let sc = -(n as f32) * 30.0 - r * if clear { 0.3 } else { 0.6 } - (d2(&q, &p.pos) - want).abs() * 0.05;
+                            if best.map_or(true, |b| sc > b.0) {
+                                best = Some((sc, q, n));
+                            }
+                        }
+                    }
+                    self.split_spot = best.filter(|b| b.2 < here).map(|b| b.1);
+                    self.split_tick = self.dcount;
+                }
+                split = self.split_spot.filter(|q| d2(q, &me_p) > 2.5);
+            }
+            match (fetch, split) {
+                (Some(g), _) => self.go_to(&mut a, g, 1.0, false),
+                (None, Some(g)) => self.go_to(&mut a, g, 1.5, false),
+                (None, None) => self.fight_move(&mut a, p.pos, want),
             }
         } else if evade {
             label = "evade";
